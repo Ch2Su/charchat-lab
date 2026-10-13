@@ -11,6 +11,8 @@
   /mod-test-output   답변 중간에 검수 테스트 문구([[검수테스트]])를 섞는다
   /error             스트리밍 도중 오류를 낸다
   /slow              5배 느리게
+  /think             답변 전에 사고(화면에는 안 보임)를 흉내 낸다
+  /think-leak        사고가 답변으로 새어 나왔다가 지워지는 경우(짝 없는 </think>)를 흉내 낸다
 """
 from __future__ import annotations
 
@@ -49,6 +51,11 @@ LONG = (
     "*시간이 조금 흐른다. {char}(이)가 천천히 주변을 둘러보며 지금까지 있었던 일을 하나씩 떠올린다.* "
     "\"그러니까, 정리해 보면 이렇게 되는 거죠.\" *손가락을 하나씩 접으며 말을 잇는다.*"
 )
+THINKING = [
+    "상대가 방금 한 말을 다시 읽어 본다. ", "캐릭터 설정과 어긋나지 않는지 확인한다. ",
+    "장면을 한 걸음만 진행하기로 한다. ", "말투는 지금까지와 같게 유지한다. ",
+]
+LEAKED_DRAFT = "(초안: 사고가 답변으로 새어 나온 부분이라 곧 지워져요.) "
 
 
 class CacheSimulator:
@@ -154,6 +161,20 @@ class MockProvider(Provider):
         finish = "stop"
         if len(reply) > max_chars:
             reply, finish = reply[:max_chars], "length"
+        thought = ""
+        if "/think" in text_in:  # 사고 흉내. /think-leak은 사고가 답변으로 샌 뒤 되돌리는 경우까지
+            for piece in THINKING:
+                thought += piece
+                yield StreamEvent("thinking", text=piece)
+                if scale:
+                    await asyncio.sleep(0.4 * scale)
+            if "/think-leak" in text_in:
+                for i in range(0, len(LEAKED_DRAFT), 4):
+                    yield StreamEvent("text", text=LEAKED_DRAFT[i:i + 4])
+                    if scale:
+                        await asyncio.sleep(0.03 * scale)
+                thought += LEAKED_DRAFT
+                yield StreamEvent("reset")
         for i in range(0, len(reply), 4):
             if "/error" in text_in and i >= 8:
                 raise ProviderError("mock 오류 테스트: 스트리밍 도중 연결이 끊긴 상황을 흉내 냈어요.")
@@ -164,7 +185,8 @@ class MockProvider(Provider):
             input_total=sim["input_total"],
             cache_read=sim["cache_read"],
             cache_write=sim["cache_write"],
-            output=estimate_tokens(reply),
+            output=estimate_tokens(reply) + estimate_tokens(thought),
+            thinking=estimate_tokens(thought),
             raw={"simulated": sim},
         )
         yield StreamEvent("done", usage=usage, finish_reason=finish)

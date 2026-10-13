@@ -106,8 +106,8 @@ class GeminiProvider(Provider):
                         finish = _name(candidate.finish_reason)
                     content = candidate.content
                     for part in (content.parts if content and content.parts else []):
-                        if part.text and not part.thought:
-                            yield StreamEvent("text", text=part.text)
+                        if part.text:
+                            yield StreamEvent("thinking" if part.thought else "text", text=part.text)
         except errors.APIError as exc:
             raise _friendly_error(exc) from exc
         if blocked:

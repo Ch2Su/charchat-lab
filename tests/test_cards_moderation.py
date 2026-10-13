@@ -5,7 +5,7 @@ import pytest
 from app.cards import CardError, apply_macros, export_card, parse_card_bytes, parse_card_json, png_with_card
 from app.moderation import RULES, SentenceGate, parse_judge
 from app.providers.mock import CacheSimulator
-from app.providers.openai_compat import ThinkStripper
+from app.providers.openai_compat import ThinkSplitter, answer_text
 from tests.conftest import load_card
 
 
@@ -74,12 +74,28 @@ def test_parse_judge():
     assert parse_judge("판정 불가") is None
 
 
-def test_think_stripper_across_chunks():
-    stripper = ThinkStripper()
-    pieces = ["<thi", "nk>속으로 생각", "중</th", "ink>\n\n안녕", "하세요 <", "b>"]
-    out = "".join(stripper.feed(p) for p in pieces) + stripper.flush()
-    assert out == "안녕하세요 <b>"
-    assert stripper.hidden_chars > 0
+def split_all(pieces):
+    splitter = ThinkSplitter()
+    events = [e for p in pieces for e in splitter.feed(p)] + splitter.flush()
+    return events
+
+
+def test_think_splitter_across_chunks():
+    events = split_all(["<thi", "nk>속으로 생각", "중</th", "ink>\n\n안녕", "하세요 <", "b>"])
+    assert answer_text(events) == "안녕하세요 <b>"
+    assert "".join(t for k, t in events if k == "thinking") == "속으로 생각중"
+    assert all(k != "reset" for k, _ in events)  # 아직 아무것도 보이기 전이라 되돌릴 게 없다
+
+
+def test_think_splitter_lone_close_tag():
+    # 템플릿이 <think>를 프롬프트에 넣는 모델: 닫는 태그만 온다. 앞부분은 이미 답변으로 나갔다.
+    events = split_all(["초안을 써 보면", " 이렇다.</thi", "nk>\n\n*하람이 웃는다.*"])
+    kinds = [k for k, _ in events]
+    assert "reset" in kinds and kinds.index("reset") > kinds.index("text")
+    assert answer_text(events) == "*하람이 웃는다.*"
+    # 사고가 따로 오고(Ollama) 본문에 짝 없는 </think>가 한 번 더 섞여도 마지막 답만 남는다
+    events = split_all(["반복된 초안 ", "</think>", "진짜 답"])
+    assert answer_text(events) == "진짜 답"
 
 
 # ── 캐시 흉내 ─────────────────────────────────────────

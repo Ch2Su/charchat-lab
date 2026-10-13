@@ -215,3 +215,45 @@ def test_greeting_cannot_be_regenerated(client, echo_id):
     chat_id = new_chat(client, echo_id)["chat"]["id"]
     response = client.post(f"/api/chats/{chat_id}/regenerate", json={})
     assert response.status_code == 400 and "인사말" in response.json()["detail"]
+
+
+def test_thinking_is_measured_but_hidden(client, echo_id):
+    chat_id = new_chat(client, echo_id)["chat"]["id"]
+    events = send(client, chat_id, "/think 관측실 보여 줘")
+    assert event(events, "thinking")
+    done = event(events, "done")[0]["message"]
+    assert done["meta"]["thinking"]["chars"] > 0 and done["meta"]["usage"]["thinking"] > 0
+    assert "캐릭터 설정과" not in done["content"]
+
+
+def test_leaked_thinking_is_reset(client, echo_id):
+    settings(client, output_buffer="none")
+    chat_id = new_chat(client, echo_id)["chat"]["id"]
+    events = send(client, chat_id, "/think-leak 안녕")
+    names = [e for e, _ in events]
+    reset_at = names.index("reset")
+    assert "delta" in names[:reset_at]  # 초안이 먼저 화면에 나갔다가 지워진다
+    done = event(events, "done")[0]["message"]
+    assert "초안" not in done["content"]
+    assert done["content"] == "".join(d["text"] for e, d in events[reset_at:] if e == "delta")
+    assert done["meta"]["thinking"]["chars"] > len("(초안")
+
+
+def test_thinking_only_reply_becomes_notice(client, echo_id, monkeypatch):
+    from app import chat_service
+    from app.providers.base import Provider, StreamEvent, Usage
+
+    class ThinkOnly(Provider):
+        name = "mock"
+
+        def render(self, req):
+            return {"fake": True}
+
+        async def stream(self, req):
+            yield StreamEvent("thinking", text="생각만 계속한다")
+            yield StreamEvent("done", usage=Usage(output=50, thinking=50), finish_reason="length")
+
+    monkeypatch.setattr(chat_service, "get_provider", lambda name: ThinkOnly())
+    chat_id = new_chat(client, echo_id)["chat"]["id"]
+    done = event(send(client, chat_id, "안녕"), "done")[0]["message"]
+    assert done["excluded"] and "최대 출력" in done["content"]

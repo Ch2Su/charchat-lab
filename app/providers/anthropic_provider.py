@@ -87,9 +87,16 @@ class AnthropicProvider(Provider):
         try:
             async with self.client.messages.stream(**payload) as stream:
                 async for event in stream:
-                    if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
-                        if event.delta.text:
+                    if event.type == "content_block_delta":
+                        kind = getattr(event.delta, "type", "")
+                        if kind == "text_delta" and event.delta.text:
                             yield StreamEvent("text", text=event.delta.text)
+                        elif kind in ("thinking_delta", "signature_delta"):
+                            # 사고 내용이 생략(omitted)돼도 시작과 끝 시점은 이 이벤트로 잴 수 있다
+                            yield StreamEvent("thinking", text=getattr(event.delta, "thinking", "") or "")
+                    elif event.type == "content_block_start" and \
+                            getattr(event.content_block, "type", "") in ("thinking", "redacted_thinking"):
+                        yield StreamEvent("thinking")
                 final = await stream.get_final_message()
         except anthropic.AnthropicError as exc:
             raise _friendly_error(exc) from exc

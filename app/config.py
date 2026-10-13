@@ -38,6 +38,14 @@ def env_float(name: str, default: float) -> float:
         return default
 
 
+def env_float_or_none(name: str) -> float | None:
+    value = env(name)
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
 def env_bool(name: str, default: bool) -> bool:
     value = env(name)
     if value is None:
@@ -80,6 +88,10 @@ OPENAI_COMPAT_BASE_URL = env("OPENAI_COMPAT_BASE_URL")
 OPENAI_COMPAT_API_KEY = env("OPENAI_COMPAT_API_KEY")
 OPENAI_COMPAT_MAX_TOKENS_PARAM = env("OPENAI_COMPAT_MAX_TOKENS_PARAM", "max_tokens")
 OPENAI_COMPAT_STREAM_USAGE = env_bool("OPENAI_COMPAT_STREAM_USAGE", True)
+# 추론형 모델의 사고 수준(none이면 끔). 비우면 보내지 않아 모델 기본값을 따른다.
+OPENAI_COMPAT_REASONING_EFFORT = env("OPENAI_COMPAT_REASONING_EFFORT")
+# 비우면 보내지 않는다. Ollama의 /v1은 top_p가 없으면 모델 기본값 대신 1.0을 쓴다.
+OPENAI_COMPAT_TOP_P = env_float_or_none("OPENAI_COMPAT_TOP_P")
 
 DEFAULT_MODELS = {
     "mock": env("MOCK_MODEL", "mock-1"),
@@ -116,18 +128,10 @@ def _initial_provider() -> str:
     return wanted if wanted in PROVIDERS else "mock"
 
 
-def _initial_temperature() -> float | None:
-    value = env("TEMPERATURE")
-    try:
-        return float(value) if value is not None else None
-    except ValueError:
-        return None
-
-
 SETTINGS_SPEC: dict[str, dict] = {
     "provider": {"type": "choice", "choices": list(PROVIDERS), "default": _initial_provider()},
     "models": {"type": "models", "default": {}},
-    "temperature": {"type": "float_or_none", "min": 0.0, "max": 2.0, "default": _initial_temperature()},
+    "temperature": {"type": "float_or_none", "min": 0.0, "max": 2.0, "default": env_float_or_none("TEMPERATURE")},
     "max_output_tokens": {"type": "int", "min": 50, "max": 8192, "default": env_int("MAX_OUTPUT_TOKENS", 700)},
     "input_token_budget": {"type": "int", "min": 500, "max": 2_000_000, "default": env_int("INPUT_TOKEN_BUDGET", 6000)},
     "window_strategy": {"type": "choice", "choices": ["anchored", "sliding", "full"], "default": env("WINDOW_STRATEGY", "anchored")},

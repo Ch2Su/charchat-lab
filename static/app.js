@@ -101,6 +101,8 @@ const usd = (value) => {
   return `$${value < 0.01 ? value.toFixed(6) : value.toFixed(4)}`;
 };
 const sleep = (time) => new Promise((resolve) => setTimeout(resolve, time));
+// 사고 분량과 시간. 내용을 주지 않는 제공사(Claude의 생략된 사고 등)는 글자 수 없이 시간만
+const thinkingText = (t) => [t.chars ? `${fmt(t.chars)}자` : '', ms(t.ms)].filter(Boolean).join(' · ');
 
 function escapeHtml(text) {
   return String(text ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -317,7 +319,7 @@ function renderModelChip() {
   $('#chip-model').innerHTML = `<strong>${escapeHtml(config.model || '모델 미지정')}</strong> ${STRATEGY_LABELS[settings.window_strategy]}`;
   const hint = $('#composer-hint');
   const parts = ['Enter로 보내고 Shift+Enter로 줄을 바꿔요.'];
-  if (settings.provider === 'mock') parts.push('mock 테스트 명령: /long, /mod-test-output, /error, /slow');
+  if (settings.provider === 'mock') parts.push('mock 테스트 명령: /long, /mod-test-output, /error, /slow, /think, /think-leak');
   if (state.view?.summarizing) parts.push('이전 대화를 요약하는 중이에요.');
   hint.textContent = parts.join(' ');
 }
@@ -389,6 +391,7 @@ function metricSpans(meta) {
     items.push(`입력 <b>${fmt(usage.input_total)}</b>`);
     items.push(`캐시 <b>${pct(usage.cache_read, usage.input_total)}</b>`);
   }
+  if (meta.thinking) items.push(`사고 <b>${ms(meta.thinking.ms)}</b>`);
   if (meta.latency?.ttft_ms !== null && meta.latency?.ttft_ms !== undefined) {
     items.push(`첫 토큰 <b>${ms(meta.latency.ttft_ms)}</b>`);
   }
@@ -590,6 +593,14 @@ async function runStream(path, body, options = {}) {
         live.querySelector('.msg-tools').innerHTML = '';
         scrollToBottom(true);
       },
+      thinking: (data) => {
+        if (!text) live.querySelector('.msg-tools').innerHTML = `<span class="metric">생각하는 중 · ${thinkingText(data)}</span>`;
+      },
+      reset: (data) => {
+        text = '';
+        liveBody.innerHTML = '';
+        live.querySelector('.msg-tools').innerHTML = `<span class="metric">답변에 섞여 나온 사고를 지웠어요 · ${thinkingText(data)}</span>`;
+      },
       retract: (data) => {
         text = data.text;
         liveBody.innerHTML = rich(text);
@@ -750,7 +761,8 @@ function turnHtml(meta, messageId, pending) {
         <dl class="kv" style="margin-top:10px">
           <dt>추정 대비 실측</dt><dd>×${(usage.input_total / (est.total || 1)).toFixed(2)}</dd>
           <dt>출력 토큰</dt><dd>${fmt(usage.output)}</dd>
-          ${usage.thinking ? `<dt>${thinkingLabel}</dt><dd>${fmt(usage.thinking)}</dd>` : ''}
+          ${usage.thinking ? `<dt>${thinkingLabel}${usage.raw?.thinking_estimated ? ' (추정)' : ''}</dt><dd>${fmt(usage.thinking)}</dd>` : ''}
+          ${meta.thinking?.chars ? `<dt>사고 분량</dt><dd>${fmt(meta.thinking.chars)}자</dd>` : ''}
         </dl>
         ${cacheNote(usage, run)}
       </section>`;
@@ -775,16 +787,22 @@ function turnHtml(meta, messageId, pending) {
 
   if (meta.latency) {
     const lat = meta.latency;
+    const think = meta.thinking;
+    const mostlyThinking = think && lat.total_ms && think.ms / lat.total_ms > 0.5;
     html += `
       <section class="panel-block">
         <h3>지연 시간</h3>
         <dl class="kv">
+          ${think ? `<dt>사고</dt><dd>${ms(think.ms)}</dd>` : ''}
           <dt>첫 토큰 (제공사)</dt><dd>${ms(lat.ttft_ms)}</dd>
           <dt>첫 표시 (검수 버퍼 뒤)</dt><dd>${ms(lat.first_visible_ms)}</dd>
           <dt>전체</dt><dd>${ms(lat.total_ms)}</dd>
           <dt>입력 검수</dt><dd>${ms(lat.input_moderation_ms)}</dd>
           <dt>출력 사후 검수</dt><dd>${ms(lat.output_moderation_ms)}</dd>
         </dl>
+        ${mostlyThinking ? note(run.provider === 'openai_compat'
+          ? '답변 시간의 절반 넘게 사고에 썼어요. 작은 로컬 모델이라면 .env에 OPENAI_COMPAT_REASONING_EFFORT=none을 넣어 사고를 꺼 보세요.'
+          : '답변 시간의 절반 넘게 사고에 썼어요. 첫 토큰을 빠르게 하려면 .env에서 사고 수준(effort, thinking level)을 낮춰 보세요.') : ''}
       </section>`;
   }
 
@@ -1033,7 +1051,8 @@ function renderSettingsForm() {
     </section>`).join('') + `
     <p class="panel-note">API 키와 엔드포인트, Claude의 effort·thinking, Gemini의 thinking level과 안전 필터는 .env에서 바꿔요(서버 재시작 필요).
     지금 값: Claude effort ${escapeHtml(config.anthropic.effort || '기본')}, thinking ${escapeHtml(config.anthropic.thinking || '기본')} /
-    Gemini thinking ${escapeHtml(config.gemini.thinking_level || '기본')}, 안전 필터 ${escapeHtml(config.gemini.safety_threshold || '기본')}</p>`;
+    Gemini thinking ${escapeHtml(config.gemini.thinking_level || '기본')}, 안전 필터 ${escapeHtml(config.gemini.safety_threshold || '기본')} /
+    OpenAI 호환 reasoning_effort ${escapeHtml(config.openai_compat.reasoning_effort || '기본')}, top_p ${escapeHtml(String(config.openai_compat.top_p ?? '기본'))}</p>`;
   const form = $('#form-settings');
   form.elements.provider.addEventListener('change', () => {
     const provider = form.elements.provider.value;

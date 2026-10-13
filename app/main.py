@@ -156,6 +156,10 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
                 "thinking_level": config.GEMINI_THINKING_LEVEL,
                 "safety_threshold": config.GEMINI_SAFETY_THRESHOLD,
             },
+            "openai_compat": {
+                "reasoning_effort": config.OPENAI_COMPAT_REASONING_EFFORT,
+                "top_p": config.OPENAI_COMPAT_TOP_P,
+            },
         }
 
     @app.put("/api/settings")

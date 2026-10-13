@@ -28,7 +28,11 @@ class Usage:
 
 @dataclass
 class StreamEvent:
-    type: str                        # "text" | "done"
+    # "text"     답변 조각
+    # "thinking" 사고 조각(화면에 보이지 않음. 내용을 안 주는 제공사는 빈 문자열로 시점만 알린다)
+    # "reset"    지금까지 보낸 text가 사실 사고였으니 지운다(짝 없는 </think>)
+    # "done"     끝. usage와 finish_reason을 담는다
+    type: str
     text: str = ""
     usage: Usage | None = None
     finish_reason: str | None = None  # stop | length | safety | refusal | error

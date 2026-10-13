@@ -5,7 +5,9 @@
 결과는 SSE(Server-Sent Events) 문자열로 흘려보낸다.
   user     저장된 사용자 메시지
   meta     조립 결과(토큰 추정, 창, 로어, 요약)와 실행 설정
+  thinking 사고 진행 상황(지금까지의 글자 수, 시간). 너무 잦지 않게 묶어서 보낸다
   delta    화면에 붙일 텍스트 조각
+  reset    지금까지 보낸 답변이 사실 사고였으니 지움(짝 없는 </think>)
   retract  검수에 걸려 지금까지 보낸 답변을 가리는 문구로 바꿈
   notice   입력이 막혔거나 위기 안내를 띄움
   error    제공사 오류
@@ -28,6 +30,11 @@ from .providers import ChatRequest, Provider, ProviderError, get_provider
 BLOCK_NOTICE = "입력이 검수 기준(분류: {category})에 걸려 모델에 보내지 않았어요. 오른쪽 검수 로그에서 자세히 볼 수 있어요."
 RETRACT_NOTICE = "(검수 기준에 걸려 가려진 응답이에요. 분류: {category})"
 PROVIDER_BLOCK_NOTICE = "(제공사 안전 장치가 응답을 막았어요: {detail})"
+THINKING_ONLY_NOTICE = {
+    "length": "(사고하다가 최대 출력 토큰을 다 써서 답변이 비었어요. 설정에서 최대 출력을 늘리거나 .env에서 사고를 줄여 보세요.)",
+    "other": "(사고만 하고 답변 없이 끝났어요. 다시 생성해 보세요.)",
+}
+THINKING_SSE_INTERVAL_MS = 300
 
 
 class TurnError(Exception):
@@ -230,6 +237,21 @@ class ChatService:
         error: str | None = None
         retracted: ModResult | None = None
         event_ids: list[int] = []
+        thinking = {"chars": 0, "first_ms": None, "last_ms": None}
+        thinking_sent_ms = -THINKING_SSE_INTERVAL_MS
+
+        def note_thinking(chars: int, first_ms: int | None = None) -> int:
+            now = _ms(started)
+            if thinking["first_ms"] is None:
+                thinking["first_ms"] = first_ms if first_ms is not None else now
+            thinking["last_ms"] = now
+            thinking["chars"] += chars
+            return now
+
+        def thinking_meta() -> dict | None:
+            if thinking["first_ms"] is None:
+                return None
+            return {"chars": thinking["chars"], "ms": thinking["last_ms"] - thinking["first_ms"]}
 
         def show(text: str) -> str | None:
             nonlocal first_visible
@@ -262,6 +284,7 @@ class ChatService:
                     "total_ms": _ms(started),
                     "input_moderation_ms": round(input_check.latency_ms, 1) if input_check else None,
                 },
+                "thinking": thinking_meta(),
                 "status": status,
                 "finish_reason": finish,
                 "finish_detail": detail,
@@ -271,7 +294,21 @@ class ChatService:
         try:
             async with aclosing(provider.stream(req)) as events:
                 async for event in events:
-                    if event.type == "text":
+                    if event.type == "thinking":
+                        now = note_thinking(len(event.text))
+                        if now - thinking_sent_ms >= THINKING_SSE_INTERVAL_MS:
+                            thinking_sent_ms = now
+                            yield sse("thinking", thinking_meta())
+                    elif event.type == "reset":
+                        # 답변으로 받은 글이 사실 사고였다. 받은 만큼 지우고 답변을 처음부터 다시 받는다.
+                        note_thinking(len("".join(raw_parts)), first_ms=ttft)
+                        raw_parts.clear()
+                        shown_parts.clear()
+                        ttft = first_visible = None
+                        if gate is not None:
+                            gate = moderation.SentenceGate(moderation.RULES.check)
+                        yield sse("reset", thinking_meta())
+                    elif event.type == "text":
                         if ttft is None:
                             ttft = _ms(started)
                         raw_parts.append(event.text)
@@ -346,6 +383,8 @@ class ChatService:
             ))
             if not raw_text:
                 content, excluded = PROVIDER_BLOCK_NOTICE.format(detail=detail or finish), True
+        elif not raw_text and not error and thinking_meta():
+            content, excluded = THINKING_ONLY_NOTICE["length" if finish == "length" else "other"], True
 
         message_id = db.add_message(chat["id"], user_msg["id"], "assistant", content, meta=meta, excluded=excluded)
         db.set_active_leaf(chat["id"], message_id)
