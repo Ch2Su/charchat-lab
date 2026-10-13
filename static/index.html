@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>charchat-lab</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%234b45c6%22/%3E%3Cpath d=%22M8 11h16v8H14l-4 4v-4H8z%22 fill=%22white%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css?v=2">
+</head>
+<body>
+  <div class="app" id="app">
+    <!-- 왼쪽: 캐릭터와 대화 목록 -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-name">charchat-lab</span>
+        <span class="brand-sub">로컬 캐릭터 채팅 실험실</span>
+      </div>
+
+      <section class="side-section">
+        <div class="side-head">
+          <h2>캐릭터</h2>
+          <div class="side-actions">
+            <button class="btn ghost small" id="btn-new-character" type="button">새로 만들기</button>
+            <label class="btn ghost small file-btn">
+              카드 가져오기
+              <input type="file" id="input-import" accept=".json,.png,application/json,image/png" hidden>
+            </label>
+          </div>
+        </div>
+        <ul class="char-list" id="char-list"></ul>
+      </section>
+
+      <section class="side-section grow">
+        <div class="side-head">
+          <h2>대화</h2>
+          <button class="btn small" id="btn-new-chat" type="button">새 대화</button>
+        </div>
+        <ul class="chat-list" id="chat-list"></ul>
+      </section>
+    </aside>
+
+    <!-- 가운데: 대화 -->
+    <main class="stage">
+      <header class="stage-head">
+        <button class="icon-btn only-narrow" id="btn-toggle-sidebar" type="button" aria-label="목록 열기">☰</button>
+        <div class="stage-title">
+          <h1 id="stage-name">charchat-lab</h1>
+          <p class="stage-sub" id="stage-sub">AI 캐릭터와 나누는 대화예요. 상대는 사람이 아니에요.</p>
+        </div>
+        <div class="stage-tools">
+          <button class="chip" id="chip-model" type="button" title="설정 열기"></button>
+          <button class="btn ghost small" id="btn-settings" type="button">설정</button>
+          <button class="btn ghost small only-narrow-inspector" id="btn-toggle-inspector" type="button">계측</button>
+        </div>
+      </header>
+
+      <div class="messages" id="messages" aria-live="polite"></div>
+
+      <div class="toast" id="toast" role="alert" hidden></div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <textarea id="input" rows="1" placeholder="메시지를 입력하세요" aria-label="메시지 입력"></textarea>
+        <button class="btn" id="btn-send" type="submit">보내기</button>
+        <button class="btn danger" id="btn-stop" type="button" hidden>멈춤</button>
+      </form>
+      <p class="composer-hint" id="composer-hint">Enter로 보내고 Shift+Enter로 줄을 바꿔요.</p>
+    </main>
+
+    <!-- 오른쪽: 계측 -->
+    <aside class="inspector" id="inspector">
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="turn" role="tab" type="button">이번 턴</button>
+        <button class="tab" data-tab="compare" role="tab" type="button">비교</button>
+        <button class="tab" data-tab="summary" role="tab" type="button">요약</button>
+        <button class="tab" data-tab="mod" role="tab" type="button">검수 로그</button>
+        <button class="icon-btn only-narrow-inspector" id="btn-close-inspector" type="button" aria-label="계측 닫기">×</button>
+      </nav>
+      <div class="tab-body" id="tab-turn"></div>
+      <div class="tab-body" id="tab-compare" hidden></div>
+      <div class="tab-body" id="tab-summary" hidden></div>
+      <div class="tab-body" id="tab-mod" hidden></div>
+    </aside>
+  </div>
+
+  <!-- 대화 시작 -->
+  <dialog class="modal" id="dlg-chat">
+    <form method="dialog" class="modal-body" id="form-chat">
+      <h2>새 대화</h2>
+      <p class="muted" id="chat-dlg-char"></p>
+      <label class="field">
+        <span>내 이름 (캐릭터가 부를 이름)</span>
+        <input name="persona_name" maxlength="40" required>
+      </label>
+      <label class="field">
+        <span>내 소개 (선택)</span>
+        <textarea name="persona_desc" rows="3" placeholder="예: 비를 맞고 들어온 대학생. 오래된 책을 좋아한다."></textarea>
+      </label>
+      <label class="field">
+        <span>대화 제목 (선택)</span>
+        <input name="title" maxlength="80">
+      </label>
+      <div class="modal-actions">
+        <button class="btn ghost" value="cancel" type="button" data-close>취소</button>
+        <button class="btn" value="ok" type="submit">대화 시작</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 설정 -->
+  <dialog class="modal wide" id="dlg-settings">
+    <form method="dialog" class="modal-body" id="form-settings">
+      <h2>설정</h2>
+      <div id="settings-fields"></div>
+      <p class="form-error" id="settings-error" hidden></p>
+      <div class="modal-actions">
+        <button class="btn ghost" type="button" id="btn-settings-reset">기본값으로</button>
+        <span class="spacer"></span>
+        <button class="btn ghost" type="button" data-close>닫기</button>
+        <button class="btn" type="submit">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 캐릭터 편집 -->
+  <dialog class="modal wide" id="dlg-character">
+    <form method="dialog" class="modal-body" id="form-character">
+      <h2 id="character-dlg-title">캐릭터</h2>
+      <div class="grid-2">
+        <label class="field"><span>이름</span><input name="name" maxlength="100" required></label>
+        <label class="field"><span>태그 (쉼표로 구분)</span><input name="tags"></label>
+      </div>
+      <label class="field"><span>설명 <small>외모, 배경, 하는 일</small></span><textarea name="description" rows="5"></textarea></label>
+      <div class="grid-2">
+        <label class="field"><span>성격과 말투</span><textarea name="personality" rows="4"></textarea></label>
+        <label class="field"><span>현재 상황</span><textarea name="scenario" rows="4"></textarea></label>
+      </div>
+      <label class="field"><span>첫 인사말</span><textarea name="first_mes" rows="4"></textarea></label>
+      <label class="field">
+        <span>대체 인사말 <small>여러 개면 줄에 <code>---</code>만 써서 나눠요</small></span>
+        <textarea name="alternate_greetings" rows="3"></textarea>
+      </label>
+      <label class="field">
+        <span>예시 대화 <small><code>&lt;START&gt;</code>로 구분하고 줄을 <code>{{user}}:</code>나 <code>{{char}}:</code>로 시작</small></span>
+        <textarea name="mes_example" rows="5"></textarea>
+      </label>
+      <details class="advanced">
+        <summary>고급: 시스템 프롬프트와 후미 지시문</summary>
+        <label class="field">
+          <span>시스템 프롬프트 <small>비우면 기본 규칙(prompts/main.txt)을 써요. <code>{{original}}</code> 자리에 기본 규칙이 들어가요</small></span>
+          <textarea name="system_prompt" rows="4"></textarea>
+        </label>
+        <label class="field">
+          <span>후미 지시문 <small>매 턴 마지막 메시지에 붙어요. <code>{{original}}</code> 자리에 prompts/post_history.txt가 들어가요</small></span>
+          <textarea name="post_history_instructions" rows="3"></textarea>
+        </label>
+        <label class="field"><span>제작자 메모 (프롬프트에는 안 들어가요)</span><textarea name="creator_notes" rows="2"></textarea></label>
+      </details>
+
+      <div class="lore-head">
+        <h3>로어북</h3>
+        <button class="btn ghost small" type="button" id="btn-add-lore">항목 추가</button>
+      </div>
+      <p class="muted small-text">키워드가 최근 대화에 나오면 그 항목이 마지막 메시지에 끼워져요. '항상'은 고정 프롬프트에 늘 들어가요.</p>
+      <div class="lore-list" id="lore-list"></div>
+
+      <p class="form-error" id="character-error" hidden></p>
+      <div class="modal-actions">
+        <button class="btn danger ghost" type="button" id="btn-delete-character">삭제</button>
+        <a class="btn ghost" id="btn-export-character" href="#" download>카드 내보내기</a>
+        <span class="spacer"></span>
+        <button class="btn ghost" type="button" data-close>닫기</button>
+        <button class="btn" type="submit">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="tpl-lore">
+    <fieldset class="lore-entry">
+      <div class="grid-3">
+        <label class="field"><span>이름</span><input data-k="name"></label>
+        <label class="field"><span>키워드 (쉼표)</span><input data-k="keys"></label>
+        <label class="field"><span>보조 키워드 (selective일 때)</span><input data-k="secondary_keys"></label>
+      </div>
+      <label class="field"><span>내용</span><textarea data-k="content" rows="3"></textarea></label>
+      <div class="lore-flags">
+        <label><input type="checkbox" data-k="enabled"> 사용</label>
+        <label><input type="checkbox" data-k="constant"> 항상</label>
+        <label><input type="checkbox" data-k="selective"> 보조 키 필요</label>
+        <label><input type="checkbox" data-k="case_sensitive"> 대소문자 구분</label>
+        <label class="num">우선순위 <input type="number" data-k="priority"></label>
+        <label class="num">순서 <input type="number" data-k="insertion_order"></label>
+        <button class="btn ghost small danger" type="button" data-remove>삭제</button>
+      </div>
+    </fieldset>
+  </template>
+
+  <script src="/static/app.js?v=2"></script>
+</body>
+</html>

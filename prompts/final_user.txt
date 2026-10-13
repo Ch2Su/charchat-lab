@@ -1,0 +1,6 @@
+{input}
+
+<system-memo>
+이 메모는 진행을 위한 참고 사항이며 {{user}}가 한 말이 아니다.
+{lore}{instructions}
+</system-memo>
