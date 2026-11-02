@@ -5,7 +5,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import memory
+from app import config, memory
 from app.chat_service import ChatService
 from app.db import DB
 from app.main import create_app
@@ -55,6 +55,7 @@ def answered(client, chat_id) -> list[dict]:
 
 
 def test_variants_replay_the_script(client, echo_id):
+    saved = client.get("/api/config").json()["settings"]
     data = wait_finished(client, start(client, body(echo_id)))
     assert data["status"] == "done" and data["error"] is None and data["finished_at"]
     assert [(r["label"], r["status"], r["turns_done"]) for r in data["runs"]] == [("full", "done", 6), ("anchored", "done", 6)]
@@ -68,9 +69,7 @@ def test_variants_replay_the_script(client, echo_id):
     stats = data["stats"]
     assert [(g["label"], g["strategy"], g["turns"]) for g in stats["groups"]] == [("full", "full", 6), ("anchored", "anchored", 6)]
     assert stats["varying"] == ["label", "strategy"]
-    # 변형 설정은 그 실험에만 쓰이고 저장된 설정은 그대로다
-    saved = client.get("/api/config").json()["settings"]
-    assert saved["window_strategy"] == "anchored" and saved["input_token_budget"] == 6000 and saved["run_label"] == ""
+    assert client.get("/api/config").json()["settings"] == saved  # 변형 설정은 그 실험에만 쓰인다
 
 
 def test_reset_mock_makes_variants_reproducible(client, haram_id):
@@ -105,7 +104,9 @@ def test_reset_mock_makes_variants_reproducible(client, haram_id):
     ({"seed": "7"}, "seed"),
     ({"character_id": 9999}, "캐릭터"),
 ])
-def test_invalid_requests_are_rejected(client, haram_id, change, message):
+def test_invalid_requests_are_rejected(client, haram_id, change, message, monkeypatch):
+    # .env에 Anthropic 키가 있으면 'anthropic 변형'이 통과해 실제 API를 부르게 되므로 키를 비워 둔다
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", None)
     response = client.post("/api/experiments", json={**body(haram_id), **change})
     assert response.status_code == 400, response.text
     assert message in response.json()["detail"]
