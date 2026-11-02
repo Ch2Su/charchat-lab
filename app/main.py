@@ -14,6 +14,7 @@ from . import config, moderation
 from .cards import CardError, export_card, parse_card_bytes
 from .chat_service import ChatService, TurnError
 from .db import DB
+from .experiments import ExperimentRunner, stats_csv
 from .providers import ProviderError, clear_mock_cache, close_all, get_provider
 
 
@@ -104,17 +105,21 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
         return config.build_settings(db.get_setting_overrides())
 
     service = ChatService(db, get_settings)
+    runner = ExperimentRunner(db, service)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         if seed:
             seed_characters(db)
+        db.interrupt_running_experiments()  # 서버가 꺼지면서 끊긴 실험
         yield
+        await runner.shutdown()  # 제공사 연결을 닫기 전에 진행 중인 실험부터 멈춘다
         await close_all()
 
     app = FastAPI(title="charchat-lab", lifespan=lifespan)
     app.state.db = db
     app.state.service = service
+    app.state.experiments = runner
 
     @app.exception_handler(TurnError)
     async def _turn_error(_request, exc: TurnError):
@@ -347,5 +352,56 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
         if not log:
             raise HTTPException(404, "이 메시지의 프롬프트 기록이 없어요.")
         return log
+
+    # ── 대본 재생 실험 ───────────────────────────
+    def experiment_or_404(experiment_id: int) -> dict:
+        experiment = db.get_experiment(experiment_id)
+        if not experiment:
+            raise HTTPException(404, "실험을 찾을 수 없어요.")
+        return experiment
+
+    def experiment_stats(experiment: dict) -> dict:
+        return service.stats_for_chats([run["chat_id"] for run in experiment["runs"] if run.get("chat_id")])
+
+    @app.post("/api/experiments")
+    async def start_experiment(body: dict):
+        return {"id": runner.start(body)}
+
+    @app.get("/api/experiments")
+    async def list_experiments():
+        rows = db.list_experiments()
+        for row in rows:  # 목록에는 대본 본문 대신 개수만
+            row["spec"]["input_count"] = len(row["spec"].pop("inputs", []))
+        return rows
+
+    @app.get("/api/experiments/{experiment_id}")
+    async def get_experiment(experiment_id: int):
+        experiment = experiment_or_404(experiment_id)
+        return {**experiment, "stats": experiment_stats(experiment)}
+
+    @app.post("/api/experiments/{experiment_id}/cancel")
+    async def cancel_experiment(experiment_id: int):
+        experiment_or_404(experiment_id)
+        if not runner.cancel(experiment_id):
+            raise HTTPException(409, "실행 중인 실험이 아니에요.")
+        return {"ok": True}
+
+    @app.delete("/api/experiments/{experiment_id}")
+    async def delete_experiment(experiment_id: int):
+        experiment_or_404(experiment_id)
+        if runner.running_id() == experiment_id:
+            raise HTTPException(409, "실행 중인 실험은 먼저 취소하세요.")
+        db.delete_experiment(experiment_id)  # 기록만 지운다. 만들어진 대화는 남긴다
+        return {"ok": True}
+
+    @app.get("/api/experiments/{experiment_id}/export.csv")
+    async def export_experiment(experiment_id: int):
+        experiment = experiment_or_404(experiment_id)
+        filename = quote(f"{experiment['name'] or '실험'}.csv")
+        return Response(
+            stats_csv(experiment_stats(experiment)["groups"]),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename=\"experiment.csv\"; filename*=UTF-8''{filename}"},
+        )
 
     return app

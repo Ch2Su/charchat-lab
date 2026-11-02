@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>charchat-lab</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%234b45c6%22/%3E%3Cpath d=%22M8 11h16v8H14l-4 4v-4H8z%22 fill=%22white%22/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/style.css?v=3">
+  <link rel="stylesheet" href="/static/style.css?v=4">
 </head>
 <body>
   <div class="app" id="app">
@@ -73,12 +73,14 @@
         <button class="tab" data-tab="compare" role="tab" type="button">비교</button>
         <button class="tab" data-tab="summary" role="tab" type="button">요약</button>
         <button class="tab" data-tab="mod" role="tab" type="button">검수 로그</button>
+        <button class="tab" data-tab="experiments" role="tab" type="button">실험</button>
         <button class="icon-btn only-narrow-inspector" id="btn-close-inspector" type="button" aria-label="계측 닫기">×</button>
       </nav>
       <div class="tab-body" id="tab-turn"></div>
       <div class="tab-body" id="tab-compare" hidden></div>
       <div class="tab-body" id="tab-summary" hidden></div>
       <div class="tab-body" id="tab-mod" hidden></div>
+      <div class="tab-body" id="tab-experiments" hidden></div>
     </aside>
   </div>
 
@@ -120,6 +122,53 @@
       </div>
     </form>
   </dialog>
+
+  <!-- 새 실험(대본 재생) -->
+  <dialog class="modal wide" id="dlg-experiment">
+    <form method="dialog" class="modal-body" id="form-experiment">
+      <h2>새 실험</h2>
+      <p class="muted small-text">입력 대본 하나를 변형(설정 묶음)마다 새 대화에서 처음부터 자동으로 보내요. 변형의 라벨이 실험 라벨이 되어 결과 표의 행을 나눠요.</p>
+      <div class="grid-3">
+        <label class="field"><span>이름</span><input name="name" maxlength="80" placeholder="예: 창 전략 비교"></label>
+        <label class="field"><span>캐릭터</span><select name="character_id"></select></label>
+        <label class="field"><span>내 이름 (페르소나)</span><input name="persona_name" maxlength="40"></label>
+      </div>
+      <label class="field">
+        <span>입력 대본 <small>한 줄에 하나씩 보내요. 빈 줄은 건너뛰어요</small></span>
+        <textarea name="inputs" rows="8" placeholder="안녕하세요&#10;책 구경해도 돼요?"></textarea>
+        <span class="help" id="experiment-count"></span>
+      </label>
+      <div class="variant-head">
+        <h3>변형</h3>
+        <button class="btn ghost small" type="button" id="btn-add-variant">변형 추가</button>
+      </div>
+      <p class="muted small-text">설정 JSON에는 지금 설정에서 바꿀 값만 적어요. 예: <code>{"window_strategy": "full"}</code>, <code>{"input_token_budget": 3000}</code>, <code>{"provider": "openai_compat", "models": {"openai_compat": "qwen3.5:4b"}}</code></p>
+      <div class="variant-list" id="variant-list"></div>
+      <div class="exp-options">
+        <label><input type="checkbox" name="reset_mock" checked> 변형마다 mock 캐시 비우고 난수 다시 심기</label>
+        <label class="num">난수 시드 <input type="number" name="seed" step="1" value="7"></label>
+        <label><input type="checkbox" name="wait_summary" checked> 매 턴 요약이 끝날 때까지 기다리기</label>
+        <label class="num">변형 사이 대기(초) <input type="number" name="cooldown_seconds" min="0" max="600" step="1" value="0"></label>
+      </div>
+      <p class="muted small-text">실제 제공사의 캐시는 비울 수 없어요. 앞 변형의 캐시가 뒤 변형에 섞이지 않게 하려면 변형 사이 대기를 캐시 수명보다 길게 두세요(Anthropic 기본 5분).</p>
+      <p class="form-error" id="experiment-error" hidden></p>
+      <div class="modal-actions">
+        <button class="btn ghost" type="button" id="btn-experiment-example">실험 2 예시 채우기</button>
+        <span class="spacer"></span>
+        <button class="btn ghost" type="button" data-close>닫기</button>
+        <button class="btn" type="submit">실험 시작</button>
+      </div>
+    </form>
+  </dialog>
+
+  <template id="tpl-variant">
+    <fieldset class="variant-entry">
+      <label class="field"><span>라벨</span><input data-v="label" maxlength="40"></label>
+      <label class="field"><span>설정 JSON</span><textarea data-v="settings" rows="2" spellcheck="false"></textarea></label>
+      <button class="btn ghost small danger" type="button" data-remove>삭제</button>
+      <p class="form-error" data-error hidden></p>
+    </fieldset>
+  </template>
 
   <!-- 캐릭터 편집 -->
   <dialog class="modal wide" id="dlg-character">
@@ -194,6 +243,6 @@
     </fieldset>
   </template>
 
-  <script src="/static/app.js?v=3"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

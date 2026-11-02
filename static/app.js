@@ -30,6 +30,11 @@ const state = {
   tab: 'turn',
   editingCharacterId: null,
   summaryPoll: null,
+  experiments: [],
+  experimentId: null,
+  experimentPoll: null,
+  experimentRender: 0,
+  experimentSnapshot: '',
 };
 
 const PROVIDER_LABELS = {
@@ -100,6 +105,20 @@ const GROUP_VALUE_LABELS = {
   output_buffer: { sentence: '문장 단위', none: '바로 표시' },
 };
 const AUX_LABELS = { judge_input: '입력', judge_output: '출력' };
+
+const EXPERIMENT_STATUS = {
+  running: '실행 중', done: '끝남', error: '오류', cancelled: '취소됨', interrupted: '서버가 꺼져 끊김', pending: '대기',
+};
+// '실험 2 예시 채우기'가 넣는 값. README 실험 2(창 전략 비교)를 하람과 실행기로 다시 해 볼 때 쓴다
+const SAMPLE_SCRIPT = [
+  '안녕하세요, 비 좀 피해도 될까요?', '고마워요. 수건 잘 쓸게요.', '차 한 잔 주시면 감사하죠.', '서점 이름이 물푸레예요?',
+  '저 고양이 이름이 뭐예요?', '책 구경해도 돼요?', '이 책은 얼마나 오래된 거예요?', '안쪽 서가에 있는 책들은 뭐예요?',
+  '누가 맡겨 둔 책인가요?', '이 서점은 언제 생겼어요?', '할머니 얘기도 듣고 싶어요.', '밤이 되면 책 속 글자가 움직인다는 소문이 있던데요.',
+  '정말이에요? 문장이 종이 위를 걸어 다닌다고요?', '2층에는 뭐가 있어요?', '비가 그친 것 같아요.', '다음에 또 와도 돼요?',
+];
+const SAMPLE_VARIANTS = ['full', 'sliding', 'anchored'].map((strategy) => ({
+  label: strategy, settings: { window_strategy: strategy, input_token_budget: 3000 },
+}));
 
 /* ── 유틸 ─────────────────────────────────── */
 const numberFormat = new Intl.NumberFormat('ko-KR');
@@ -674,10 +693,11 @@ function pollSummary() {
 /* ── 계측 패널 ─────────────────────────────── */
 function renderInspector() {
   $$('.tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === state.tab));
-  for (const id of ['turn', 'compare', 'summary', 'mod']) $(`#tab-${id}`).hidden = id !== state.tab;
+  for (const id of ['turn', 'compare', 'summary', 'mod', 'experiments']) $(`#tab-${id}`).hidden = id !== state.tab;
   if (state.tab === 'turn') renderTurnTab();
   else if (state.tab === 'compare') renderCompareTab();
   else if (state.tab === 'summary') renderSummaryTab();
+  else if (state.tab === 'experiments') renderExperimentsTab();
   else renderModTab();
 }
 
@@ -1041,6 +1061,147 @@ async function renderModTab() {
   }
 }
 
+/* ── 실험(대본 재생) 탭 ─────────────────────── */
+const experimentStatus = (status) => EXPERIMENT_STATUS[status] || escapeHtml(status);
+
+function experimentProgress(e) {
+  const p = e.progress || {};
+  return e.status === 'running'
+    ? `변형 ${p.variant}/${p.variants} · 턴 ${p.turn}/${p.turns}`
+    : `입력 ${p.turns ?? '?'}개 × 변형 ${p.variants ?? '?'}개`;
+}
+
+function experimentDetailHtml(e) {
+  const p = e.progress || {};
+  const done = Math.max(0, (p.variant - 1) * p.turns + p.turn);
+  const ratio = p.variants && p.turns ? done / (p.variants * p.turns) : 0;
+  const runs = e.runs.map((run) => `
+    <tr>
+      <td><b>${escapeHtml(run.label)}</b>${run.error ? `<span class="cell-sub">${escapeHtml(run.error)}</span>` : ''}</td>
+      <td>${experimentStatus(run.status)}</td>
+      <td>${run.turns_done}/${p.turns ?? '?'}</td>
+      <td>${run.blocked}</td>
+      <td>${run.chat_id ? `<button class="link-btn" type="button" data-open-chat="${run.chat_id}">대화 열기</button>` : '–'}</td>
+    </tr>`).join('');
+  const groups = e.stats?.groups || [];
+  return `
+    <section class="panel-block">
+      <h3>${escapeHtml(e.name)} <span class="status-chip ${escapeHtml(e.status)}">${experimentStatus(e.status)}</span></h3>
+      ${note(`${escapeHtml(e.character_name || '지워진 캐릭터')} · ${experimentProgress(e)}${e.spec?.reset_mock ? ' · 변형마다 mock 초기화' : ''}${e.spec?.wait_summary ? ' · 요약 기다림' : ''}`)}
+      ${e.status === 'running' ? `<div class="stack thin"><span class="seg-history" style="width:${Math.round(ratio * 100)}%"></span></div>` : ''}
+      ${e.error ? `<p class="panel-warn">${escapeHtml(e.error)}</p>` : ''}
+      <table class="compare runs">
+        <thead><tr><th>변형</th><th>상태</th><th>턴</th><th>막힘</th><th></th></tr></thead>
+        <tbody>${runs}</tbody>
+      </table>
+      <div class="row-actions">
+        ${e.status === 'running'
+          ? '<button class="btn ghost small" type="button" id="btn-cancel-experiment">취소</button>'
+          : '<button class="btn ghost small danger" type="button" id="btn-delete-experiment">기록 삭제</button>'}
+        ${groups.length ? `<a class="btn ghost small" href="/api/experiments/${e.id}/export.csv" download>CSV로 내려받기</a>` : ''}
+      </div>
+      ${e.status === 'running' ? '' : note('기록을 지워도 실험이 만든 대화는 남아요.')}
+    </section>
+    ${groups.length ? `
+    <section class="panel-block">
+      <h3>결과 비교${e.status === 'running' ? ' (진행 중)' : ''}</h3>
+      ${compareTable(groups, e.stats.varying)}
+      ${note('변형마다 새 대화에서 같은 대본을 처음부터 보낸 결과예요. 변형의 라벨이 실험 라벨이라 행이 변형별로 나뉘어요.')}
+    </section>` : ''}`;
+}
+
+function experimentsHtml(list, detail) {
+  const items = list.map((e) => `
+    <li class="${e.id === state.experimentId ? 'active' : ''}">
+      <button class="list-item" type="button" data-experiment="${e.id}">
+        <span class="grow">
+          <span class="title">${escapeHtml(e.name)}</span>
+          <span class="sub">${experimentStatus(e.status)} · ${experimentProgress(e)} · ${relativeTime(e.created_at)}</span>
+        </span>
+      </button>
+    </li>`).join('');
+  return `
+    <section class="panel-block">
+      <div class="panel-head">
+        <h3>대본 재생 실험</h3>
+        <button class="btn small" type="button" id="btn-new-experiment">새 실험</button>
+      </div>
+      ${note('입력 대본 하나를 여러 설정(변형)으로 새 대화에서 처음부터 자동으로 보내고, 결과를 비교 표로 보여 줘요. 한 번에 하나만 돌아요.')}
+      ${list.length ? `<ul class="exp-list">${items}</ul>` : note('아직 실험이 없어요.')}
+    </section>
+    ${detail ? experimentDetailHtml(detail) : ''}`;
+}
+
+async function openExperimentChat(experiment, chatId) {
+  if (experiment.character_id && experiment.character_id !== state.characterId) await selectCharacter(experiment.character_id);
+  else await refreshChatList();
+  await openChat(chatId);
+  if (window.matchMedia('(max-width: 1180px)').matches) $('#app').classList.remove('show-inspector');
+}
+
+function bindExperimentsTab(box, detail) {
+  $('#btn-new-experiment', box).addEventListener('click', openExperimentDialog);
+  $$('[data-experiment]', box).forEach((button) => button.addEventListener('click', () => {
+    state.experimentId = Number(button.dataset.experiment);
+    renderExperimentsTab();
+  }));
+  if (!detail) return;
+  $$('[data-open-chat]', box).forEach((button) => button.addEventListener('click', () =>
+    openExperimentChat(detail, Number(button.dataset.openChat)).catch((error) => toast(error.message))));
+  $('#btn-cancel-experiment', box)?.addEventListener('click', async (event) => {
+    event.target.disabled = true;
+    try {
+      await api(`/api/experiments/${detail.id}/cancel`, { method: 'POST' });
+      toast('실험을 취소했어요. 보내던 턴은 받은 만큼 저장돼요.');
+    } catch (error) {
+      toast(error.message);
+    }
+    renderExperimentsTab();
+  });
+  $('#btn-delete-experiment', box)?.addEventListener('click', async () => {
+    if (!window.confirm('이 실험 기록을 지울까요? 실험이 만든 대화는 남아요.')) return;
+    try {
+      await api(`/api/experiments/${detail.id}`, { method: 'DELETE' });
+      state.experimentId = null;
+    } catch (error) {
+      toast(error.message);
+    }
+    renderExperimentsTab();
+  });
+}
+
+async function renderExperimentsTab({ force = true } = {}) {
+  clearTimeout(state.experimentPoll);
+  const box = $('#tab-experiments');
+  const token = ++state.experimentRender; // 늦게 도착한 이전 응답이 화면을 덮지 않게 한다
+  let list;
+  let detail = null;
+  try {
+    list = await api('/api/experiments');
+    if (state.experimentId) detail = await api(`/api/experiments/${state.experimentId}`).catch(() => null);
+  } catch (error) {
+    if (token === state.experimentRender) box.innerHTML = note(escapeHtml(error.message));
+    return;
+  }
+  if (token !== state.experimentRender || state.tab !== 'experiments') return;
+  if (state.experimentId && !detail) state.experimentId = null;
+  const wasRunning = state.experiments.some((e) => e.status === 'running');
+  const running = list.some((e) => e.status === 'running');
+  state.experiments = list;
+  // 진행 중에는 1초마다 다시 불러온다. 바뀐 것이 없으면 다시 그리지 않아 스크롤과 포커스를 지킨다
+  const snapshot = JSON.stringify([list, detail]);
+  if (force || snapshot !== state.experimentSnapshot) {
+    state.experimentSnapshot = snapshot;
+    box.innerHTML = experimentsHtml(list, detail);
+    bindExperimentsTab(box, detail);
+  }
+  if (running) state.experimentPoll = setTimeout(() => renderExperimentsTab({ force: false }), 1000);
+  else if (wasRunning) {
+    refreshChatList(); // 실험이 만든 대화를 왼쪽 목록에 반영한다
+    loadCharacters();
+  }
+}
+
 /* ── 새 대화 ──────────────────────────────── */
 function openNewChat() {
   if (!state.characterId) {
@@ -1077,6 +1238,128 @@ async function submitNewChat(event) {
     $('#input').focus();
   } catch (error) {
     toast(error.message);
+  }
+}
+
+/* ── 새 실험 ──────────────────────────────── */
+const scriptLines = () => $('#form-experiment').elements.inputs.value.split('\n').map((line) => line.trim()).filter(Boolean);
+
+function updateExperimentCount() {
+  const inputs = scriptLines().length;
+  const variants = $$('#variant-list .variant-entry').length;
+  $('#experiment-count').textContent = `입력 ${inputs}개 × 변형 ${variants}개 = 턴 ${inputs * variants}개`;
+}
+
+function addVariant(variant = { label: '', settings: {} }) {
+  const node = $('#tpl-variant').content.firstElementChild.cloneNode(true);
+  node.querySelector('[data-v="label"]').value = variant.label;
+  node.querySelector('[data-v="settings"]').value = JSON.stringify(variant.settings);
+  node.querySelector('[data-remove]').addEventListener('click', () => {
+    node.remove();
+    updateExperimentCount();
+  });
+  $('#variant-list').appendChild(node);
+  updateExperimentCount();
+  return node;
+}
+
+function openExperimentDialog() {
+  if (!state.characters.length) {
+    toast('먼저 캐릭터를 만들어 주세요.');
+    return;
+  }
+  const form = $('#form-experiment');
+  form.reset();
+  form.elements.character_id.innerHTML = state.characters.map((c) =>
+    `<option value="${c.id}" ${c.id === state.characterId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+  form.elements.persona_name.value = store.get('personaName', '지우');
+  $('#variant-list').innerHTML = '';
+  addVariant({ label: '기본', settings: {} }); // 지금 설정 그대로 보내는 변형
+  $('#experiment-error').hidden = true;
+  $('#dlg-experiment').showModal();
+  form.elements.name.focus();
+}
+
+function fillExperimentExample() {
+  const form = $('#form-experiment');
+  const haram = state.characters.find((c) => c.name === '하람');
+  if (haram) form.elements.character_id.value = haram.id;
+  form.elements.name.value = '창 전략 비교 (실험 2)';
+  form.elements.inputs.value = SAMPLE_SCRIPT.join('\n');
+  $('#variant-list').innerHTML = '';
+  SAMPLE_VARIANTS.forEach((variant) => addVariant(variant));
+}
+
+/* 변형 줄을 읽는다. JSON을 읽지 못한 줄은 그 아래에 이유를 보여 주고 null을 돌려준다 */
+function collectVariants() {
+  let ok = true;
+  const variants = $$('#variant-list .variant-entry').map((node) => {
+    const error = node.querySelector('[data-error]');
+    error.hidden = true;
+    const label = node.querySelector('[data-v="label"]').value.trim();
+    const raw = node.querySelector('[data-v="settings"]').value.trim();
+    let settings = {};
+    try {
+      settings = raw ? JSON.parse(raw) : {};
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+        throw new TypeError('설정은 {"이름": 값} 모양의 JSON 객체여야 해요.');
+      }
+    } catch (err) {
+      error.textContent = err instanceof SyntaxError ? `JSON을 읽지 못했어요: ${err.message}` : err.message;
+      error.hidden = false;
+      ok = false;
+    }
+    if (!label) {
+      error.textContent = '라벨을 입력하세요. 결과 표의 행 이름이 돼요.';
+      error.hidden = false;
+      ok = false;
+    }
+    return { label, settings };
+  });
+  return ok ? variants : null;
+}
+
+async function submitExperiment(event) {
+  event.preventDefault();
+  const form = event.target;
+  const errorBox = $('#experiment-error');
+  errorBox.hidden = true;
+  const variants = collectVariants();
+  if (!variants) return;
+  const inputs = scriptLines();
+  if (!inputs.length || !variants.length) {
+    errorBox.textContent = '입력 대본과 변형을 하나 이상 넣으세요.';
+    errorBox.hidden = false;
+    return;
+  }
+  // mock이 아닌 제공사로 보내는 변형이 있으면 실제 호출 횟수를 한 번 묻는다
+  const current = state.config?.settings.provider;
+  const paid = variants.filter((v) => (v.settings.provider || current) !== 'mock').length;
+  if (paid && !window.confirm(`실제 API를 ${inputs.length * paid}번 호출해요. 계속할까요?`)) return;
+  const seed = form.elements.seed.value.trim();
+  const body = {
+    name: form.elements.name.value.trim(),
+    character_id: Number(form.elements.character_id.value),
+    persona_name: form.elements.persona_name.value.trim(),
+    inputs,
+    variants,
+    reset_mock: form.elements.reset_mock.checked,
+    seed: seed === '' ? null : Number(seed),
+    wait_summary: form.elements.wait_summary.checked,
+    cooldown_seconds: Number(form.elements.cooldown_seconds.value || 0),
+  };
+  try {
+    const { id } = await api('/api/experiments', { json: body });
+    $('#dlg-experiment').close();
+    state.experimentId = id;
+    state.tab = 'experiments';
+    renderInspector();
+    if (window.matchMedia('(max-width: 1180px)').matches) $('#app').classList.add('show-inspector');
+    toast('실험을 시작했어요. 실험 탭에서 진행 상황을 볼 수 있어요.');
+  } catch (error) {
+    // 모달이 열려 있는 동안 토스트는 배경 뒤에 가려지므로 대화상자 안에 보여 준다
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
   }
 }
 
@@ -1329,6 +1612,13 @@ function bindEvents() {
   $('#form-character').addEventListener('submit', submitCharacter);
   $('#btn-add-lore').addEventListener('click', () => addLoreEntry().querySelector('[data-k="name"]').focus());
   $('#btn-delete-character').addEventListener('click', deleteCharacter);
+  $('#form-experiment').addEventListener('submit', submitExperiment);
+  $('#form-experiment').elements.inputs.addEventListener('input', updateExperimentCount);
+  $('#btn-add-variant').addEventListener('click', () => {
+    const n = $$('#variant-list .variant-entry').length + 1;
+    addVariant({ label: `변형 ${n}`, settings: {} }).querySelector('[data-v="settings"]').focus();
+  });
+  $('#btn-experiment-example').addEventListener('click', fillExperimentExample);
   $$('[data-close]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
   $$('.tab').forEach((tab) => tab.addEventListener('click', () => {
     state.tab = tab.dataset.tab;

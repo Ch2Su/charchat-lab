@@ -110,7 +110,21 @@ CREATE TABLE IF NOT EXISTS settings(
 SCHEMA_VERSION_BASE = 1  # 지금의 SCHEMA가 버전 1이다
 
 # (버전, [SQL 문장, ...]). 버전은 2부터 1씩 올린다. 이미 배포된 항목은 고치지 않고 새 항목을 덧붙인다.
-MIGRATIONS: list[tuple[int, list[str]]] = []
+MIGRATIONS: list[tuple[int, list[str]]] = [
+    # 2: 대본 재생 실험(app/experiments.py). 만들어진 대화는 chats에 있고, 여기는 요청과 진행 상황만 둔다.
+    (2, ["""CREATE TABLE experiments(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL DEFAULT '',
+  character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+  spec TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress TEXT NOT NULL DEFAULT '{}',
+  runs TEXT NOT NULL DEFAULT '[]',
+  error TEXT,
+  created_at REAL NOT NULL,
+  finished_at REAL
+)"""]),
+]
 
 CHARACTER_TEXT_FIELDS = (
     "name", "description", "personality", "scenario", "first_mes", "mes_example",
@@ -497,6 +511,59 @@ class DB:
         if row:
             row["payload"] = _loads(row["payload"], {})
         return row
+
+    # ── 실험 ──────────────────────────────────────
+    @staticmethod
+    def _experiment_row(row: dict) -> dict:
+        row["spec"] = _loads(row.get("spec"), {})
+        row["progress"] = _loads(row.get("progress"), {})
+        row["runs"] = _loads(row.get("runs"), [])
+        return row
+
+    def create_experiment(self, name: str, character_id: int | None, spec: dict, status: str = "running") -> int:
+        return self.exec(
+            "INSERT INTO experiments(name, character_id, spec, status, created_at) VALUES(?,?,?,?,?)",
+            (name, character_id, _dumps(spec), status, _now()),
+        )
+
+    def get_experiment(self, experiment_id: int) -> dict | None:
+        row = self.one(
+            """SELECT e.*, c.name AS character_name FROM experiments e
+               LEFT JOIN characters c ON c.id = e.character_id WHERE e.id=?""",
+            (experiment_id,),
+        )
+        return self._experiment_row(row) if row else None
+
+    def list_experiments(self, limit: int = 50) -> list[dict]:
+        rows = self.q(
+            """SELECT e.*, c.name AS character_name FROM experiments e
+               LEFT JOIN characters c ON c.id = e.character_id ORDER BY e.id DESC LIMIT ?""",
+            (limit,),
+        )
+        return [self._experiment_row(r) for r in rows]
+
+    def update_experiment(self, experiment_id: int, **fields) -> None:
+        sets, params = [], []
+        for key, value in fields.items():
+            if key in ("progress", "runs"):
+                value = _dumps(value)
+            elif key not in ("status", "error", "finished_at"):
+                continue
+            sets.append(f"{key}=?")
+            params.append(value)
+        if sets:
+            self.exec(f"UPDATE experiments SET {', '.join(sets)} WHERE id=?", (*params, experiment_id))
+
+    def delete_experiment(self, experiment_id: int) -> None:
+        self.exec("DELETE FROM experiments WHERE id=?", (experiment_id,))
+
+    def interrupt_running_experiments(self) -> int:
+        """서버가 꺼지면서 끊긴 실험(running으로 남은 행)을 interrupted로 바꾼다. 서버를 켤 때 부른다."""
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE experiments SET status='interrupted', finished_at=? WHERE status='running'", (_now(),)
+            )
+            return cur.rowcount
 
     # ── 설정 ──────────────────────────────────────
     def get_setting_overrides(self) -> dict:

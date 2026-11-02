@@ -131,3 +131,13 @@ async def wait_idle(timeout: float = 5.0) -> None:
     """테스트용: 진행 중인 요약 작업이 끝날 때까지 기다린다."""
     if _tasks:
         await asyncio.wait(list(_tasks), timeout=timeout)
+
+
+async def wait_chat(chat_id: int, timeout: float = 120.0) -> None:
+    """대본 재생 실험용: 이 대화의 요약이 끝날 때까지 기다린다. 시간이 넘으면 그냥 돌아온다.
+
+    요약이 끝나기 전에 다음 턴을 보내면 그 턴은 overflow로 잘려서, 요약이 늦는 정도에 따라 결과가 흔들린다.
+    """
+    deadline = time.monotonic() + timeout
+    while chat_id in _running and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)

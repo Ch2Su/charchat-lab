@@ -108,12 +108,14 @@ class ChatService:
         )
 
     # ── 진입점 ───────────────────────────────────
-    def send(self, chat_id: int, content: str) -> AsyncIterator[str]:
+    def send(self, chat_id: int, content: str, settings: dict | None = None) -> AsyncIterator[str]:
+        """settings를 주면 저장된 설정 대신 그것으로 보낸다(대본 재생 실험의 변형). 요약 예약도 그 설정을 따른다."""
         chat = self._chat(chat_id)
         content = (content or "").strip()
         if not content:
             raise TurnError("보낼 내용이 비어 있어요.")
-        settings = self.get_settings()
+        if settings is None:
+            settings = self.get_settings()
         provider = self._provider(settings)
         return self._send_flow(chat, chat["active_leaf_id"], content, settings, provider)
 
