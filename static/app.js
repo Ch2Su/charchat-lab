@@ -105,6 +105,11 @@ const GROUP_VALUE_LABELS = {
   output_buffer: { sentence: '문장 단위', none: '바로 표시' },
 };
 const AUX_LABELS = { judge_input: '입력', judge_output: '출력' };
+// 답변 품질 어림 지표(app/quality.py)의 깃발과 말투
+const QUALITY_FLAG_LABELS = {
+  foreign: '외국 문자', latin: '영문 섞임', speech_shift: '말투 변화', repeat_prev: '반복', repeat_self: '반복',
+};
+const SPEECH_LABELS = { polite: '존댓말', plain: '반말', mixed: '섞임' };
 
 const EXPERIMENT_STATUS = {
   running: '실행 중', done: '끝남', error: '오류', cancelled: '취소됨', interrupted: '서버가 꺼져 끊김', pending: '대기',
@@ -133,6 +138,13 @@ const usd = (value) => {
   return `$${value < 0.01 ? value.toFixed(6) : value.toFixed(4)}`;
 };
 const sleep = (time) => new Promise((resolve) => setTimeout(resolve, time));
+// 0~1 비율을 퍼센트로. 외국 문자처럼 작은 값은 소수 한 자리까지
+const ratio = (value) => {
+  if (value === null || value === undefined) return '–';
+  const percent = value * 100;
+  return `${percent < 10 && percent > 0 ? percent.toFixed(1) : Math.round(percent)}%`;
+};
+const speechText = (level) => SPEECH_LABELS[level] || '판단 못 함';
 // 사고 분량과 시간. 내용을 주지 않는 제공사(Claude의 생략된 사고 등)는 글자 수 없이 시간만
 const thinkingText = (t) => [t.chars ? `${fmt(t.chars)}자` : '', ms(t.ms)].filter(Boolean).join(' · ');
 
@@ -353,7 +365,7 @@ function renderModelChip() {
   $('#chip-model').innerHTML = `<strong>${escapeHtml(config.model || '모델 미지정')}</strong> ${STRATEGY_LABELS[settings.window_strategy]}${label}`;
   const hint = $('#composer-hint');
   const parts = ['Enter로 보내고 Shift+Enter로 줄을 바꿔요.'];
-  if (settings.provider === 'mock') parts.push('mock 테스트 명령: /long, /mod-test-output, /error, /slow, /think, /think-leak');
+  if (settings.provider === 'mock') parts.push('mock 테스트 명령: /long, /mod-test-output, /error, /slow, /think, /think-leak, /quality-test');
   if (state.view?.summarizing) parts.push('이전 대화를 요약하는 중이에요.');
   hint.textContent = parts.join(' ');
 }
@@ -429,10 +441,27 @@ function metricSpans(meta) {
   if (meta.latency?.ttft_ms !== null && meta.latency?.ttft_ms !== undefined) {
     items.push(`첫 토큰 <b>${ms(meta.latency.ttft_ms)}</b>`);
   }
-  return items.map((html) => {
+  const spans = items.map((html) => {
     const span = document.createElement('span');
     span.className = 'metric';
     span.innerHTML = html;
+    return span;
+  });
+  return [...spans, ...qualityFlags(meta.quality)];
+}
+
+/* 답변 품질 깃발. 반복은 직전 답과 겹침, 답 안 반복 둘 중 하나만 걸려도 한 번만 붙인다 */
+function qualityFlags(quality) {
+  if (!quality?.flags?.length) return [];
+  const titles = {
+    '외국 문자': `한자·가나 등 외국 문자 ${ratio(quality.foreign_ratio)}`,
+    '영문 섞임': `로마자 ${ratio(quality.latin_ratio)}`,
+    '말투 변화': `직전 답들은 ${speechText(quality.speech_prev)}, 이번 답은 ${speechText(quality.speech?.level)}`,
+    '반복': `직전 답과 겹침 ${ratio(quality.repeat_prev)}, 답 안 반복 ${ratio(quality.repeat_self)}`,
+  };
+  return [...new Set(quality.flags.map((f) => QUALITY_FLAG_LABELS[f] || f))].map((text) => {
+    const span = flag(text);
+    span.title = `${titles[text] || text} (글자 모양과 어미만 보는 어림 지표)`;
     return span;
   });
 }
@@ -845,6 +874,25 @@ function turnHtml(meta, messageId, pending) {
       </section>`;
   }
 
+  const q = meta.quality;
+  if (q) {
+    const flagged = [...new Set((q.flags || []).map((f) => QUALITY_FLAG_LABELS[f] || f))];
+    html += `
+      <section class="panel-block">
+        <h3>답변 품질 <span class="muted small-text">어림</span></h3>
+        <dl class="kv">
+          <dt>외국 문자 (한자·가나 등)</dt><dd>${ratio(q.foreign_ratio)}</dd>
+          <dt>로마자</dt><dd>${ratio(q.latin_ratio)}</dd>
+          <dt>말투 (이번 / 직전)</dt><dd title="존댓말 어미 ${q.speech.polite}개, 반말 어미 ${q.speech.plain}개">${speechText(q.speech.level)} / ${speechText(q.speech_prev)}</dd>
+          <dt>직전 답과 겹침</dt><dd>${ratio(q.repeat_prev)}</dd>
+          <dt>답 안 반복</dt><dd>${ratio(q.repeat_self)}</dd>
+        </dl>
+        ${flagged.length ? `<p class="panel-warn">깃발: ${flagged.map(escapeHtml).join(', ')}</p>` : ''}
+        ${note('글자 모양과 어미만 보는 어림 지표예요. 판단은 직접 읽고 하세요.')}
+        ${run.provider === 'mock' ? note('mock 답변은 정해진 문장 조각을 이어 붙여서 직전 답과 겹침이 높게 나오기 쉬워요. /quality-test로 깃발을 확인할 수 있어요.') : ''}
+      </section>`;
+  }
+
   const w = d.window;
   html += `
     <section class="panel-block">
@@ -934,6 +982,7 @@ function compareTable(groups, varying) {
     if (g.judge_calls) costParts.push(`검수 ${g.judge_calls}회 ${usd(g.judge_usd)}`);
     // 좁은 패널에서 아무 데서나 줄이 바뀌지 않게 항목마다 한 줄씩 쓴다
     const costDetail = g.has_cost && costParts.length > 1 ? `<span class="cell-sub">${costParts.join('<br>')}</span>` : '';
+    const measured = g.quality_turns; // 품질 지표를 남기기 전의 턴뿐이면 0
     return `
       <tr>
         <td>${g.label ? `<b>${escapeHtml(g.label)}</b><br>` : ''}${escapeHtml(g.model ?? '모델 기록 없음')}${conditions.length
@@ -944,6 +993,9 @@ function compareTable(groups, varying) {
         <td>${g.has_cost ? usd(g.total_usd) : '–'}${costDetail}</td>
         <td>${ms(g.avg_ttft_ms)}</td>
         <td>${ms(g.avg_first_visible_ms)}</td>
+        <td>${measured ? `${ratio(g.avg_foreign_ratio)}<span class="cell-sub">로마자 ${ratio(g.avg_latin_ratio)}</span>` : '–'}</td>
+        <td>${measured ? ratio(g.avg_repeat_prev) : '–'}</td>
+        <td>${measured ? `${g.speech_shift_turns}/${measured}<span class="cell-sub">깃발 ${g.flagged_turns}턴</span>` : '–'}</td>
       </tr>`;
   }).join('');
   const first = groups[0] || {};
@@ -953,11 +1005,13 @@ function compareTable(groups, varying) {
   return `
     <div class="table-scroll">
       <table class="compare">
-        <thead><tr><th>설정</th><th>턴</th><th>입력</th><th>캐시</th><th>비용</th><th>첫 토큰</th><th>첫 표시</th></tr></thead>
+        <thead><tr><th>설정</th><th>턴</th><th>입력</th><th>캐시</th><th>비용</th><th>첫 토큰</th><th>첫 표시</th>
+          <th>외국 문자</th><th>반복</th><th>말투 변화</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
-    ${common.length ? note(`모든 행에 같은 조건: ${common.map(escapeHtml).join(' · ')}`) : ''}`;
+    ${common.length ? note(`모든 행에 같은 조건: ${common.map(escapeHtml).join(' · ')}`) : ''}
+    ${groups.some((g) => g.quality_turns) ? note('외국 문자는 한자·가나 등의 평균 비율(아래는 로마자), 반복은 직전 답과 겹친 글자 5-gram의 평균 비율, 말투 변화는 존댓말과 반말이 뒤바뀐 턴 수예요(아래는 깃발이 붙은 턴). 글자 모양과 어미만 보는 어림 지표예요.') : ''}`;
 }
 
 async function renderCompareTab() {
@@ -1074,7 +1128,7 @@ function experimentProgress(e) {
 function experimentDetailHtml(e) {
   const p = e.progress || {};
   const done = Math.max(0, (p.variant - 1) * p.turns + p.turn);
-  const ratio = p.variants && p.turns ? done / (p.variants * p.turns) : 0;
+  const share = p.variants && p.turns ? done / (p.variants * p.turns) : 0;
   const runs = e.runs.map((run) => `
     <tr>
       <td><b>${escapeHtml(run.label)}</b>${run.error ? `<span class="cell-sub">${escapeHtml(run.error)}</span>` : ''}</td>
@@ -1088,7 +1142,7 @@ function experimentDetailHtml(e) {
     <section class="panel-block">
       <h3>${escapeHtml(e.name)} <span class="status-chip ${escapeHtml(e.status)}">${experimentStatus(e.status)}</span></h3>
       ${note(`${escapeHtml(e.character_name || '지워진 캐릭터')} · ${experimentProgress(e)}${e.spec?.reset_mock ? ' · 변형마다 mock 초기화' : ''}${e.spec?.wait_summary ? ' · 요약 기다림' : ''}`)}
-      ${e.status === 'running' ? `<div class="stack thin"><span class="seg-history" style="width:${Math.round(ratio * 100)}%"></span></div>` : ''}
+      ${e.status === 'running' ? `<div class="stack thin"><span class="seg-history" style="width:${Math.round(share * 100)}%"></span></div>` : ''}
       ${e.error ? `<p class="panel-warn">${escapeHtml(e.error)}</p>` : ''}
       <table class="compare runs">
         <thead><tr><th>변형</th><th>상태</th><th>턴</th><th>막힘</th><th></th></tr></thead>

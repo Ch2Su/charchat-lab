@@ -120,5 +120,6 @@ def test_stats_tolerate_old_messages(client, echo_id):
     old, new = data["groups"]
     assert old["turns"] == 1 and old["input_token_budget"] is None and old["options"] is None
     assert old["total_usd"] == 0.001 and old["avg_first_visible_ms"] is None and old["summary_calls"] == 0
+    assert old["quality_turns"] == 0 and old["avg_foreign_ratio"] is None  # 품질 지표 전의 답변
     assert new["turns"] == 1 and new["options"] is not None
     assert {"options", "prompt_version", "input_token_budget"} <= set(data["varying"])

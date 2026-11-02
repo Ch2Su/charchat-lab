@@ -25,7 +25,7 @@ import time
 from contextlib import aclosing
 from typing import AsyncIterator, Callable
 
-from . import config, memory, moderation, pricing
+from . import config, memory, moderation, pricing, quality
 from .db import DB
 from .moderation import ModResult
 from .prompt import assemble, load_prompt, persona_name
@@ -406,6 +406,11 @@ class ChatService:
         elif not raw_text and not error and thinking_meta():
             content, excluded = THINKING_ONLY_NOTICE["length" if finish == "length" else "other"], True
 
+        # 답변 품질 어림 지표. 가려진 답, 안내문, 오류로 잘린 답은 재지 않는다(멈춤으로 잘린 답처럼 비교가 안 된다)
+        if not excluded and not error and content.strip():
+            previous = [m["content"] for m in prior if m["role"] == "assistant" and not m.get("excluded")][-5:]
+            meta["quality"] = quality.measure(content, previous)
+
         message_id = db.add_message(chat["id"], user_msg["id"], "assistant", content, meta=meta, excluded=excluded)
         db.set_active_leaf(chat["id"], message_id)
         db.add_prompt_log(chat["id"], message_id, "chat", payload)
@@ -498,7 +503,8 @@ class ChatService:
                     "turns": 0, "input_total": 0, "cache_read": 0, "cache_write": 0, "output": 0,
                     "usd": 0.0, "no_cache_usd": 0.0, "has_cost": False,
                     "judge_calls": 0, "judge_usd": 0.0, "summary_calls": 0, "summary_usd": 0.0,
-                    "_ttft": [], "_first_visible": [],
+                    "quality_turns": 0, "speech_shift_turns": 0, "flagged_turns": 0,
+                    "_ttft": [], "_first_visible": [], "_foreign": 0.0, "_latin": 0.0, "_repeat_prev": 0.0,
                 }
             return groups[key]
 
@@ -535,6 +541,14 @@ class ChatService:
                 group["_ttft"].append(latency["ttft_ms"])
             if latency.get("first_visible_ms") is not None:
                 group["_first_visible"].append(latency["first_visible_ms"])
+            measured = meta.get("quality")  # 품질 지표를 남기기 전의 턴에는 없다
+            if measured:
+                group["quality_turns"] += 1
+                group["_foreign"] += measured.get("foreign_ratio") or 0
+                group["_latin"] += measured.get("latin_ratio") or 0
+                group["_repeat_prev"] += measured.get("repeat_prev") or 0
+                group["speech_shift_turns"] += bool(measured.get("speech_shift"))
+                group["flagged_turns"] += bool(measured.get("flags"))
 
         summaries = self.db.q(f"SELECT meta FROM summaries WHERE chat_id IN ({marks}) ORDER BY id", ids) if ids else []
         for row in summaries:
@@ -559,6 +573,11 @@ class ChatService:
             for field in ("usd", "no_cache_usd", "judge_usd", "summary_usd"):
                 group[field] = round(group[field], 8)
             group["total_usd"] = round(group["usd"] + group["judge_usd"] + group["summary_usd"], 8)
+            measured = group["quality_turns"]
+            for source, target in (("_foreign", "avg_foreign_ratio"), ("_latin", "avg_latin_ratio"),
+                                   ("_repeat_prev", "avg_repeat_prev")):
+                total = group.pop(source)
+                group[target] = round(total / measured, 4) if measured else None
             result.append(group)
         varying = [f for i, f in enumerate(GROUP_FIELDS) if len({key[i] for key in groups}) > 1]
         return {"varying": varying, "groups": result}
