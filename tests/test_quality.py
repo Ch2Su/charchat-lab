@@ -28,6 +28,25 @@ def test_speech_level_reads_dialogue_only():
     assert quality.speech_level('"고마워. 뭐 해? 이리 줘."') == {"polite": 0, "plain": 3, "level": "plain"}
 
 
+def test_prompt_markup_leak_is_flagged():
+    leaked = quality.measure('"책 구경? <system-memo>가 말씀하신 설정을 기억해야 해요."', [])
+    assert leaked["leak"] and "leak" in leaked["flags"]
+    assert quality.measure('"{{user}} 님, 어서 오세요."', [])["leak"]
+    plain = quality.measure('"어서 오세요. 천천히 보세요."', [])
+    assert not plain["leak"] and "leak" not in plain["flags"]
+
+
+def test_archaic_polite_ending_is_polite():
+    assert quality.speech_level('"그렇게 하겠습네다."')["level"] == "polite"
+
+
+def test_repeat_prev_flag_starts_at_forty_percent():
+    first = "".join(chr(0xAC00 + i) for i in range(24))
+    second = "".join(chr(0xAC00 + i) for i in range(24, 48))
+    measured = quality.measure(first + second, [first])  # 5-gram 44개 중 20개가 직전 답에 있다
+    assert 0.4 <= measured["repeat_prev"] < 0.5 and "repeat_prev" in measured["flags"]
+
+
 def test_unclosed_quote_does_not_misread_dialogue():
     # 큰따옴표가 홀수면 짝짓기가 어긋난다. 첫 따옴표를 닫지 않아도 묘사의 "~했다"가 반말 대사로 잡히면 안 된다
     text = '"안녕하세요? *그가 웃었다.* "어서 오세요. 천천히 보세요." "차 한잔 하시겠어요?"'

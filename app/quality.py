@@ -17,7 +17,8 @@ from collections import Counter
 
 FOREIGN_WARN = 0.01
 LATIN_WARN = 0.05
-REPEAT_PREV_WARN = 0.5
+# 로컬 모델 4종 12턴씩(2026-11-03)에서 문장 틀을 되풀이하는 모델의 직전 답 겹침은 0.41~0.48, 나머지는 0.18 이하였다
+REPEAT_PREV_WARN = 0.4
 REPEAT_SELF_WARN = 0.3
 
 _QUOTE = re.compile(r'"([^"]*)"|“([^”]*)”')
@@ -28,9 +29,12 @@ _PUNCT = re.compile(r"[^\w\s]")
 _SPACE = re.compile(r"\s+")
 # 존댓말을 먼저 본다. 그래야 "합니다"의 "니다"를 반말 "다"로 잘못 세지 않는다.
 # 음절 단위로 비교하므로 모음이 줄어든 반말 어미(와=오+아, 해, 봐, 줘, 돼, 워)는 따로 적는다
-_POLITE = re.compile(r"(요|니다|니까|세요|죠|십시오)$")
+_POLITE = re.compile(r"(요|니다|네다|니까|세요|죠|십시오)$")
 _PLAIN = re.compile(r"(다|야|어|아|지|냐|니|자|래|게|네|군|걸|거든|잖아|해|와|봐|줘|돼|워)$")
 # 한 글자짜리 대답은 어미 규칙과 반대로 읽힌다("네?"는 존댓말인데 반말 어미 "네"에 걸린다)
+# 프롬프트의 장치가 답에 그대로 나온 경우. 작은 모델이 마지막 입력에 붙은 <system-memo>를 대사에 따라 쓴다
+# (qwen3.5:2b에서 12턴 중 11턴). 풀지 못한 {{매크로}}와 채팅 템플릿 토큰도 같은 종류의 새어 나옴이다
+_LEAK = re.compile(r"system-memo|\{\{\s*\w+|<\|im_(?:start|end)\|>", re.IGNORECASE)
 _ANSWER_WORDS = {"네": "polite", "예": "polite", "응": "plain"}
 
 
@@ -134,6 +138,7 @@ def measure(text: str, previous: list[str]) -> dict:
     speech_shift = {speech["level"], speech_prev} == {"polite", "plain"}
     repeat_prev = round(repeat_prev_ratio(text, previous[-1] if previous else None), 4)
     repeat_self = round(repeat_self_ratio(text), 4)
+    leak = bool(_LEAK.search(text))
     flags = []
     if foreign >= FOREIGN_WARN:
         flags.append("foreign")
@@ -145,6 +150,8 @@ def measure(text: str, previous: list[str]) -> dict:
         flags.append("repeat_prev")
     if repeat_self >= REPEAT_SELF_WARN:
         flags.append("repeat_self")
+    if leak:
+        flags.append("leak")
     return {
         "chars": len(text),
         "sentences": len(_sentences(text)),
@@ -156,5 +163,6 @@ def measure(text: str, previous: list[str]) -> dict:
         "speech_shift": speech_shift,
         "repeat_prev": repeat_prev,
         "repeat_self": repeat_self,
+        "leak": leak,
         "flags": flags,
     }

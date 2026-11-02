@@ -107,7 +107,7 @@ const GROUP_VALUE_LABELS = {
 const AUX_LABELS = { judge_input: '입력', judge_output: '출력' };
 // 답변 품질 어림 지표(app/quality.py)의 깃발과 말투
 const QUALITY_FLAG_LABELS = {
-  foreign: '외국 문자', latin: '영문 섞임', speech_shift: '말투 변화', repeat_prev: '반복', repeat_self: '반복',
+  foreign: '외국 문자', latin: '영문 섞임', speech_shift: '말투 변화', repeat_prev: '반복', repeat_self: '반복', leak: '프롬프트 샘',
 };
 const SPEECH_LABELS = { polite: '존댓말', plain: '반말', mixed: '섞임' };
 
@@ -458,6 +458,7 @@ function qualityFlags(quality) {
     '영문 섞임': `로마자 ${ratio(quality.latin_ratio)}`,
     '말투 변화': `직전 답들은 ${speechText(quality.speech_prev)}, 이번 답은 ${speechText(quality.speech?.level)}`,
     '반복': `직전 답과 겹침 ${ratio(quality.repeat_prev)}, 답 안 반복 ${ratio(quality.repeat_self)}`,
+    '프롬프트 샘': '답에 프롬프트의 장치(<system-memo> 등)가 그대로 나왔어요',
   };
   return [...new Set(quality.flags.map((f) => QUALITY_FLAG_LABELS[f] || f))].map((text) => {
     const span = flag(text);
@@ -888,6 +889,7 @@ function turnHtml(meta, messageId, pending) {
           <dt>말투 (이번 / 직전)</dt><dd title="존댓말 어미 ${q.speech.polite}개, 반말 어미 ${q.speech.plain}개">${speechText(q.speech.level)} / ${speechText(q.speech_prev)}</dd>
           <dt>직전 답과 겹침</dt><dd>${ratio(q.repeat_prev)}</dd>
           <dt>답 안 반복</dt><dd>${ratio(q.repeat_self)}</dd>
+          ${q.leak ? '<dt>프롬프트 샘</dt><dd>있음</dd>' : ''}
         </dl>
         ${flagged.length ? `<p class="panel-warn">깃발: ${flagged.map(escapeHtml).join(', ')}</p>` : ''}
         ${note('글자 모양과 어미만 보는 어림 지표예요. 판단은 직접 읽고 하세요.')}
@@ -997,7 +999,7 @@ function compareTable(groups, varying) {
         <td>${ms(g.avg_first_visible_ms)}${g.turns > 1 ? `<span class="cell-sub">중앙값 ${ms(g.median_first_visible_ms)}</span>` : ''}</td>
         <td>${measured ? `${ratio(g.avg_foreign_ratio)}<span class="cell-sub">낀 턴 ${g.foreign_turns}/${measured}<br>로마자 ${ratio(g.avg_latin_ratio)}</span>` : '–'}</td>
         <td>${measured ? ratio(g.avg_repeat_prev) : '–'}</td>
-        <td>${measured ? `${g.speech_shift_turns}/${measured}<span class="cell-sub">깃발 ${g.flagged_turns}턴</span>` : '–'}</td>
+        <td>${measured ? `${g.speech_shift_turns}/${measured}<span class="cell-sub">깃발 ${g.flagged_turns}턴${g.leak_turns ? `<br>프롬프트 샘 ${g.leak_turns}턴` : ''}</span>` : '–'}</td>
       </tr>`;
   }).join('');
   const first = groups[0] || {};

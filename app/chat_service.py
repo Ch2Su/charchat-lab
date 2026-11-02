@@ -506,7 +506,7 @@ class ChatService:
                     "turns": 0, "input_total": 0, "cache_read": 0, "cache_write": 0, "output": 0,
                     "usd": 0.0, "no_cache_usd": 0.0, "has_cost": False,
                     "judge_calls": 0, "judge_usd": 0.0, "summary_calls": 0, "summary_usd": 0.0,
-                    "quality_turns": 0, "foreign_turns": 0, "speech_shift_turns": 0, "flagged_turns": 0,
+                    "quality_turns": 0, "foreign_turns": 0, "leak_turns": 0, "speech_shift_turns": 0, "flagged_turns": 0,
                     "_ttft": [], "_first_visible": [], "_foreign": 0.0, "_latin": 0.0, "_repeat_prev": 0.0,
                 }
             return groups[key]
@@ -554,6 +554,7 @@ class ChatService:
                 group["foreign_turns"] += bool(measured.get("foreign_ratio"))  # 비율이 낮아도 한 글자라도 낀 턴
                 group["_latin"] += measured.get("latin_ratio") or 0
                 group["_repeat_prev"] += measured.get("repeat_prev") or 0
+                group["leak_turns"] += bool(measured.get("leak"))
                 group["speech_shift_turns"] += bool(measured.get("speech_shift"))
                 group["flagged_turns"] += bool(measured.get("flags"))
 
