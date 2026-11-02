@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 
@@ -32,6 +33,18 @@ PLACEHOLDER_AFTER_SUMMARY = "(이전 줄거리에 이어서)"
 def load_prompt(name: str) -> str:
     """prompts/ 폴더의 템플릿을 매번 다시 읽는다. 서버를 재시작하지 않아도 수정이 바로 반영된다."""
     return (config.PROMPTS_DIR / name).read_text(encoding="utf-8").strip()
+
+
+def prompts_fingerprint() -> str:
+    """prompts/*.txt의 이름과 내용으로 만든 8자 지문. 프롬프트 파일을 고친 전후를 실행 조건으로 구분한다.
+
+    load_prompt처럼 매번 다시 읽는다(파일이 몇 개 안 되고 작다). 내용은 load_prompt가 읽는 그대로 써서
+    줄바꿈 방식(CRLF/LF)이나 끝 공백만 다른 경우는 같은 지문이 된다.
+    """
+    digest = hashlib.sha1()
+    for path in sorted(config.PROMPTS_DIR.glob("*.txt"), key=lambda p: p.name):
+        digest.update(f"{path.name}\0{load_prompt(path.name)}".encode("utf-8"))
+    return digest.hexdigest()[:8]
 
 
 def fill(template: str, values: dict[str, str]) -> str:

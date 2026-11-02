@@ -12,6 +12,9 @@
 
 LLM 판정이 실패하면(네트워크 오류, JSON 해석 실패) 통과시키고 이유를 기록한다(fail-open).
 실제 서비스라면 막는 쪽(fail-closed)을 검토해야 한다.
+
+LLM 판정은 대화 밖에서 부르는 호출이라 그 사용량(usage, provider, model)을 결과에 담아 둔다.
+턴 기록이 이것을 '보조 호출 비용'으로 남겨야 비교 탭의 비용에 빠지지 않는다.
 """
 from __future__ import annotations
 
@@ -35,6 +38,9 @@ class ModResult:
     matched: str | None = None
     reason: str | None = None
     latency_ms: float = 0.0
+    usage: dict | None = None     # LLM 판정 호출의 사용량. 호출하지 않았거나 호출이 실패하면 None
+    provider: str | None = None
+    model: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -106,15 +112,17 @@ async def llm_judge(provider: Provider, model: str, text: str) -> ModResult:
                          latency_ms=(time.perf_counter() - started) * 1000)
     parsed = parse_judge(result.text)
     elapsed = (time.perf_counter() - started) * 1000
+    # 해석에 실패해도 호출은 끝났고 비용이 들었으므로 사용량은 남긴다
+    spent = {"usage": result.usage.to_dict(), "provider": provider.name, "model": model}
     if parsed is None:
         return ModResult(False, "none", "llm", reason=f"판정 결과 해석 실패(통과 처리): {result.text[:80]}",
-                         latency_ms=elapsed)
+                         latency_ms=elapsed, **spent)
     flagged = bool(parsed.get("flagged"))
     category = str(parsed.get("category") or "none")
     if flagged and category == "none":
         category = "other"
     return ModResult(flagged, category if flagged else "none", "llm", reason=parsed.get("reason"),
-                     latency_ms=elapsed)
+                     latency_ms=elapsed, **spent)
 
 
 async def check(text: str, settings: dict, provider: Provider, model: str) -> ModResult:

@@ -13,6 +13,10 @@
   /slow              5배 느리게
   /think             답변 전에 사고(화면에는 안 보임)를 흉내 낸다
   /think-leak        사고가 답변으로 새어 나왔다가 지워지는 경우(짝 없는 </think>)를 흉내 낸다
+  /quality-test      답변 끝에 한자·영어가 섞인 대사와 똑같은 문장 세 번을 붙인다(답변 품질 지표 확인용)
+
+답변 끝의 안내 줄은 한글로만 쓴다. 로마자가 섞이면 짧은 mock 답변마다 '영문 섞임' 깃발이 붙어서
+/quality-test와 구분되지 않는다.
 """
 from __future__ import annotations
 
@@ -56,6 +60,10 @@ THINKING = [
     "장면을 한 걸음만 진행하기로 한다. ", "말투는 지금까지와 같게 유지한다. ",
 ]
 LEAKED_DRAFT = "(초안: 사고가 답변으로 새어 나온 부분이라 곧 지워져요.) "
+QUALITY_TEST = [
+    "\"这个故事 정말 interesting해요. 我们一起 끝까지 읽어 봐요.\"",  # 한자 8자와 영어 한 단어
+    " ".join(["\"같은 말을 자꾸 되풀이하게 되네요.\""] * 3),            # 8자 넘는 같은 문장 세 번
+]
 
 
 class CacheSimulator:
@@ -133,6 +141,13 @@ class MockProvider(Provider):
         payload["_note"] = "mock 제공사: 실제로 전송되지 않으며, Anthropic 형식으로 캐시를 흉내 낸다."
         return payload
 
+    def options(self) -> dict:
+        return {
+            "delay_scale": config.MOCK_DELAY_SCALE,
+            "cache_min_tokens": self.cache.min_tokens,
+            "cache_ttl": self.cache.ttl,
+        }
+
     def _reply(self, req: ChatRequest) -> str:
         hints = req.hints or {}
         char, user = hints.get("char", "캐릭터"), hints.get("user", "사용자")
@@ -145,7 +160,9 @@ class MockProvider(Provider):
             parts.extend(LONG.format(char=char) for _ in range(5))
         lore = hints.get("lore") or []
         lore_text = ", ".join(lore) if lore else "없음"
-        parts.append(f"(mock 응답이에요. 받은 대화 {len(req.history)}개, 반영한 로어: {lore_text})")
+        parts.append(f"(흉내 낸 응답이에요. 받은 대화 {len(req.history)}개, 반영한 로어: {lore_text})")
+        if "/quality-test" in text:
+            parts.extend(QUALITY_TEST)
         return "\n\n".join(parts)
 
     async def stream(self, req: ChatRequest) -> AsyncIterator[StreamEvent]:

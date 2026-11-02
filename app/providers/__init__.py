@@ -38,6 +38,20 @@ def clear_mock_cache() -> int:
     return count
 
 
+def reset_mock(seed: int | None = None) -> int:
+    """대본 재생 실험의 변형마다 mock을 같은 상태에서 시작하게 한다.
+
+    흉내 캐시를 비우고, seed가 있으면 답변 난수를 다시 심는다. 변형마다 같은 답변 순서가 나와야
+    설정 차이만 비교할 수 있다. 지운 캐시 항목 수를 돌려준다.
+    """
+    provider = get_provider("mock")
+    count = len(provider.cache.entries)
+    provider.cache.entries.clear()
+    if seed is not None:
+        provider.rng.seed(seed)
+    return count
+
+
 async def close_all() -> None:
     for provider in list(_instances.values()):
         try:
@@ -49,5 +63,5 @@ async def close_all() -> None:
 
 __all__ = [
     "ChatRequest", "CompleteResult", "Provider", "ProviderError", "StreamEvent", "Usage",
-    "get_provider", "close_all", "clear_mock_cache",
+    "get_provider", "close_all", "clear_mock_cache", "reset_mock",
 ]

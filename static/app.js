@@ -30,6 +30,11 @@ const state = {
   tab: 'turn',
   editingCharacterId: null,
   summaryPoll: null,
+  experiments: [],
+  experimentId: null,
+  experimentPoll: null,
+  experimentRender: 0,
+  experimentSnapshot: '',
 };
 
 const PROVIDER_LABELS = {
@@ -47,7 +52,7 @@ const FINISH_LABELS = {
 };
 
 const SETTING_GROUPS = [
-  { title: '모델', fields: ['provider', 'model'] },
+  { title: '모델', fields: ['provider', 'model', 'run_label'] },
   { title: '창과 요약', fields: ['window_strategy', 'input_token_budget', 'summary_trigger_ratio', 'summary_keep_ratio'] },
   { title: '캐시와 로어북', fields: ['cache_mode', 'lore_scan_depth', 'lore_token_budget'] },
   { title: '생성', fields: ['max_output_tokens', 'temperature'] },
@@ -86,7 +91,39 @@ const FIELD_INFO = {
     label: '출력 버퍼',
     options: { sentence: '문장 단위로 검사한 뒤 표시', none: '바로 표시하고 끝난 뒤 검사' },
   },
+  run_label: { label: '실험 라벨', help: '비교 탭에서 이 이름으로 행을 나눠요. 비우면 라벨 없이 기록해요.' },
 };
+
+// 비교 표: 행을 나누는 실행 조건(서버의 GROUP_FIELDS)과, 조건 이름·값을 짧게 보여 줄 때 쓰는 표
+const GROUP_FIELDS = ['label', 'provider', 'model', 'strategy', 'cache_mode', 'input_token_budget',
+  'max_output_tokens', 'temperature', 'moderation_backend', 'output_buffer', 'options', 'prompt_version'];
+const GROUP_FIELD_INFO_KEYS = { label: 'run_label', strategy: 'window_strategy' };
+const GROUP_VALUE_LABELS = {
+  strategy: STRATEGY_LABELS,
+  cache_mode: CACHE_LABELS,
+  moderation_backend: { rules: '규칙', llm: 'LLM 판정' },
+  output_buffer: { sentence: '문장 단위', none: '바로 표시' },
+};
+const AUX_LABELS = { judge_input: '입력', judge_output: '출력' };
+// 답변 품질 어림 지표(app/quality.py)의 깃발과 말투
+const QUALITY_FLAG_LABELS = {
+  foreign: '외국 문자', latin: '영문 섞임', speech_shift: '말투 변화', repeat_prev: '반복', repeat_self: '반복',
+};
+const SPEECH_LABELS = { polite: '존댓말', plain: '반말', mixed: '섞임' };
+
+const EXPERIMENT_STATUS = {
+  running: '실행 중', done: '끝남', error: '오류', cancelled: '취소됨', interrupted: '서버가 꺼져 끊김', pending: '대기',
+};
+// '실험 2 예시 채우기'가 넣는 값. README 실험 2(창 전략 비교)를 하람과 실행기로 다시 해 볼 때 쓴다
+const SAMPLE_SCRIPT = [
+  '안녕하세요, 비 좀 피해도 될까요?', '고마워요. 수건 잘 쓸게요.', '차 한 잔 주시면 감사하죠.', '서점 이름이 물푸레예요?',
+  '저 고양이 이름이 뭐예요?', '책 구경해도 돼요?', '이 책은 얼마나 오래된 거예요?', '안쪽 서가에 있는 책들은 뭐예요?',
+  '누가 맡겨 둔 책인가요?', '이 서점은 언제 생겼어요?', '할머니 얘기도 듣고 싶어요.', '밤이 되면 책 속 글자가 움직인다는 소문이 있던데요.',
+  '정말이에요? 문장이 종이 위를 걸어 다닌다고요?', '2층에는 뭐가 있어요?', '비가 그친 것 같아요.', '다음에 또 와도 돼요?',
+];
+const SAMPLE_VARIANTS = ['full', 'sliding', 'anchored'].map((strategy) => ({
+  label: strategy, settings: { window_strategy: strategy, input_token_budget: 3000 },
+}));
 
 /* ── 유틸 ─────────────────────────────────── */
 const numberFormat = new Intl.NumberFormat('ko-KR');
@@ -101,6 +138,13 @@ const usd = (value) => {
   return `$${value < 0.01 ? value.toFixed(6) : value.toFixed(4)}`;
 };
 const sleep = (time) => new Promise((resolve) => setTimeout(resolve, time));
+// 0~1 비율을 퍼센트로. 외국 문자처럼 작은 값은 소수 한 자리까지
+const ratio = (value) => {
+  if (value === null || value === undefined) return '–';
+  const percent = value * 100;
+  return `${percent < 10 && percent > 0 ? percent.toFixed(1) : Math.round(percent)}%`;
+};
+const speechText = (level) => SPEECH_LABELS[level] || '판단 못 함';
 // 사고 분량과 시간. 내용을 주지 않는 제공사(Claude의 생략된 사고 등)는 글자 수 없이 시간만
 const thinkingText = (t) => [t.chars ? `${fmt(t.chars)}자` : '', ms(t.ms)].filter(Boolean).join(' · ');
 
@@ -316,10 +360,12 @@ function renderModelChip() {
   const config = state.config;
   if (!config) return;
   const settings = config.settings;
-  $('#chip-model').innerHTML = `<strong>${escapeHtml(config.model || '모델 미지정')}</strong> ${STRATEGY_LABELS[settings.window_strategy]}`;
+  // 라벨을 켜 둔 채 잊으면 다음 턴들도 그 라벨로 묶이므로 늘 보이게 둔다
+  const label = settings.run_label ? ` · 라벨 ${escapeHtml(settings.run_label)}` : '';
+  $('#chip-model').innerHTML = `<strong>${escapeHtml(config.model || '모델 미지정')}</strong> ${STRATEGY_LABELS[settings.window_strategy]}${label}`;
   const hint = $('#composer-hint');
   const parts = ['Enter로 보내고 Shift+Enter로 줄을 바꿔요.'];
-  if (settings.provider === 'mock') parts.push('mock 테스트 명령: /long, /mod-test-output, /error, /slow, /think, /think-leak');
+  if (settings.provider === 'mock') parts.push('mock 테스트 명령: /long, /mod-test-output, /error, /slow, /think, /think-leak, /quality-test');
   if (state.view?.summarizing) parts.push('이전 대화를 요약하는 중이에요.');
   hint.textContent = parts.join(' ');
 }
@@ -395,10 +441,27 @@ function metricSpans(meta) {
   if (meta.latency?.ttft_ms !== null && meta.latency?.ttft_ms !== undefined) {
     items.push(`첫 토큰 <b>${ms(meta.latency.ttft_ms)}</b>`);
   }
-  return items.map((html) => {
+  const spans = items.map((html) => {
     const span = document.createElement('span');
     span.className = 'metric';
     span.innerHTML = html;
+    return span;
+  });
+  return [...spans, ...qualityFlags(meta.quality)];
+}
+
+/* 답변 품질 깃발. 반복은 직전 답과 겹침, 답 안 반복 둘 중 하나만 걸려도 한 번만 붙인다 */
+function qualityFlags(quality) {
+  if (!quality?.flags?.length) return [];
+  const titles = {
+    '외국 문자': `한자·가나 등 외국 문자 ${ratio(quality.foreign_ratio)}`,
+    '영문 섞임': `로마자 ${ratio(quality.latin_ratio)}`,
+    '말투 변화': `직전 답들은 ${speechText(quality.speech_prev)}, 이번 답은 ${speechText(quality.speech?.level)}`,
+    '반복': `직전 답과 겹침 ${ratio(quality.repeat_prev)}, 답 안 반복 ${ratio(quality.repeat_self)}`,
+  };
+  return [...new Set(quality.flags.map((f) => QUALITY_FLAG_LABELS[f] || f))].map((text) => {
+    const span = flag(text);
+    span.title = `${titles[text] || text} (글자 모양과 어미만 보는 어림 지표)`;
     return span;
   });
 }
@@ -659,10 +722,11 @@ function pollSummary() {
 /* ── 계측 패널 ─────────────────────────────── */
 function renderInspector() {
   $$('.tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === state.tab));
-  for (const id of ['turn', 'compare', 'summary', 'mod']) $(`#tab-${id}`).hidden = id !== state.tab;
+  for (const id of ['turn', 'compare', 'summary', 'mod', 'experiments']) $(`#tab-${id}`).hidden = id !== state.tab;
   if (state.tab === 'turn') renderTurnTab();
   else if (state.tab === 'compare') renderCompareTab();
   else if (state.tab === 'summary') renderSummaryTab();
+  else if (state.tab === 'experiments') renderExperimentsTab();
   else renderModTab();
 }
 
@@ -770,17 +834,21 @@ function turnHtml(meta, messageId, pending) {
     html += `<section class="panel-block"><h3>실제 입력 토큰</h3>${note('사용량 정보가 없어요. 중간에 멈췄거나 검수로 스트림을 끊은 경우예요.')}</section>`;
   }
 
-  if (meta.cost) {
-    const saved = meta.cost.no_cache_usd ? 1 - meta.cost.usd / meta.cost.no_cache_usd : 0;
+  const aux = meta.aux || [];
+  if (meta.cost || aux.length) {
+    const saved = meta.cost?.no_cache_usd ? 1 - meta.cost.usd / meta.cost.no_cache_usd : 0;
     html += `
       <section class="panel-block">
         <h3>비용</h3>
         <dl class="kv">
+          ${meta.cost ? `
           <dt>이번 턴</dt><dd>${usd(meta.cost.usd)}</dd>
           <dt>캐시가 없었다면</dt><dd>${usd(meta.cost.no_cache_usd)}</dd>
-          <dt>캐시 효과</dt><dd>${saved >= 0 ? `${Math.round(saved * 100)}% 절약` : `${Math.round(-saved * 100)}% 더 듦`}</dd>
+          <dt>캐시 효과</dt><dd>${saved >= 0 ? `${Math.round(saved * 100)}% 절약` : `${Math.round(-saved * 100)}% 더 듦`}</dd>` : ''}
+          ${aux.map((a) => `<dt>검수 판정 (${AUX_LABELS[a.purpose] || escapeHtml(a.purpose)})</dt><dd>${a.cost ? usd(a.cost.usd) : '–'} · ${ms(a.latency_ms)}</dd>`).join('')}
         </dl>
         ${saved < 0 ? note('처음 캐시에 쓰는 턴은 쓰기 비용(1.25배) 때문에 오히려 비싸요. 다음 턴부터 읽기(0.1배)로 돌려받아요.') : ''}
+        ${aux.length ? note('검수 판정은 대화와 따로 부르는 LLM 호출이에요. 이번 턴 비용에는 들어가지 않고, 비교 탭의 비용 합계에는 들어가요.') : ''}
         ${run.provider === 'mock' ? note('mock은 Claude Haiku 5.5 가격으로 흉내 낸 값이에요.') : ''}
       </section>`;
   }
@@ -803,6 +871,25 @@ function turnHtml(meta, messageId, pending) {
         ${mostlyThinking ? note(run.provider === 'openai_compat'
           ? '답변 시간의 절반 넘게 사고에 썼어요. 작은 로컬 모델이라면 .env에 OPENAI_COMPAT_REASONING_EFFORT=none을 넣어 사고를 꺼 보세요.'
           : '답변 시간의 절반 넘게 사고에 썼어요. 첫 토큰을 빠르게 하려면 .env에서 사고 수준(effort, thinking level)을 낮춰 보세요.') : ''}
+      </section>`;
+  }
+
+  const q = meta.quality;
+  if (q) {
+    const flagged = [...new Set((q.flags || []).map((f) => QUALITY_FLAG_LABELS[f] || f))];
+    html += `
+      <section class="panel-block">
+        <h3>답변 품질 <span class="muted small-text">어림</span></h3>
+        <dl class="kv">
+          <dt>외국 문자 (한자·가나 등)</dt><dd>${ratio(q.foreign_ratio)}</dd>
+          <dt>로마자</dt><dd>${ratio(q.latin_ratio)}</dd>
+          <dt>말투 (이번 / 직전)</dt><dd title="존댓말 어미 ${q.speech.polite}개, 반말 어미 ${q.speech.plain}개">${speechText(q.speech.level)} / ${speechText(q.speech_prev)}</dd>
+          <dt>직전 답과 겹침</dt><dd>${ratio(q.repeat_prev)}</dd>
+          <dt>답 안 반복</dt><dd>${ratio(q.repeat_self)}</dd>
+        </dl>
+        ${flagged.length ? `<p class="panel-warn">깃발: ${flagged.map(escapeHtml).join(', ')}</p>` : ''}
+        ${note('글자 모양과 어미만 보는 어림 지표예요. 판단은 직접 읽고 하세요.')}
+        ${run.provider === 'mock' ? note('mock 답변은 정해진 문장 조각을 이어 붙여서 직전 답과 겹침이 높게 나오기 쉬워요. /quality-test로 깃발을 확인할 수 있어요.') : ''}
       </section>`;
   }
 
@@ -836,15 +923,21 @@ function turnHtml(meta, messageId, pending) {
     </section>`;
 
   if (run.provider) {
+    const options = Object.entries(run.options || {}).map(([k, v]) => `${k} ${v ?? '기본'}`).join(', ');
     html += `
       <section class="panel-block">
         <h3>실행 설정</h3>
         <dl class="kv">
+          ${run.label ? `<dt>실험 라벨</dt><dd>${escapeHtml(run.label)}</dd>` : ''}
           <dt>제공사</dt><dd>${escapeHtml(run.provider)}</dd>
           <dt>모델</dt><dd>${escapeHtml(run.model)}</dd>
+          ${run.input_token_budget ? `<dt>입력 예산</dt><dd>${fmt(run.input_token_budget)}</dd>` : ''}
+          ${run.max_output_tokens ? `<dt>최대 출력</dt><dd>${fmt(run.max_output_tokens)}</dd>` : ''}
           <dt>캐시 방식</dt><dd>${CACHE_LABELS[run.cache_mode] || run.cache_mode}</dd>
           <dt>검수</dt><dd>${escapeHtml(run.moderation_mode)}, ${escapeHtml(run.moderation_backend)}</dd>
           <dt>출력 버퍼</dt><dd>${escapeHtml(run.output_buffer)}</dd>
+          ${options ? `<dt>.env 옵션</dt><dd>${escapeHtml(options)}</dd>` : ''}
+          ${run.prompt_version ? `<dt>프롬프트 버전</dt><dd>${escapeHtml(run.prompt_version)}</dd>` : ''}
           ${meta.finish_reason ? `<dt>종료 이유</dt><dd>${FINISH_LABELS[meta.finish_reason] || escapeHtml(meta.finish_reason)}</dd>` : ''}
         </dl>
         ${meta.finish_detail ? note(escapeHtml(meta.finish_detail)) : ''}
@@ -862,6 +955,65 @@ function turnHtml(meta, messageId, pending) {
   return html;
 }
 
+/* 실행 조건 하나를 '이름 값'으로. 옛 기록에 없는 값은 '기록 없음'으로 보여 준다 */
+function conditionText(field, value) {
+  if (field === 'prompt_version') return value ? `프롬프트 ${value}` : '프롬프트 기록 없음';
+  const name = FIELD_INFO[GROUP_FIELD_INFO_KEYS[field] || field]?.label || field;
+  if (value === null || value === undefined) return `${name} ${field === 'temperature' ? '기본' : '기록 없음'}`;
+  const text = GROUP_VALUE_LABELS[field]?.[value] ?? (typeof value === 'number' ? numberFormat.format(value) : value);
+  return `${name} ${text}`;
+}
+
+const optionTexts = (options, keys) => (options
+  ? keys.map((key) => `${key} ${options[key] ?? '기본'}`)
+  : ['.env 옵션 기록 없음']);
+
+/* 비교 표. 비교 탭(대화 하나)과 실험 탭(여러 대화)이 함께 쓴다.
+   설정 칸에는 라벨과 모델, 그리고 행마다 다른 조건(varying)만 보여 주고, 같은 조건은 표 아래에 한 번만 적는다. */
+function compareTable(groups, varying) {
+  // .env 옵션은 묶음째 다르다고 나오므로, 그 안에서도 실제로 값이 다른 키만 고른다
+  const optionKeys = [...new Set(groups.flatMap((g) => Object.keys(g.options || {})))]
+    .filter((key) => new Set(groups.map((g) => JSON.stringify(g.options?.[key] ?? null))).size > 1);
+  const rows = groups.map((g) => {
+    const conditions = varying.filter((f) => f !== 'label' && f !== 'model')
+      .flatMap((f) => (f === 'options' ? optionTexts(g.options, optionKeys) : [conditionText(f, g[f])]));
+    const costParts = [`대화 ${usd(g.usd)}`];
+    if (g.summary_calls) costParts.push(`요약 ${g.summary_calls}회 ${usd(g.summary_usd)}`);
+    if (g.judge_calls) costParts.push(`검수 ${g.judge_calls}회 ${usd(g.judge_usd)}`);
+    // 좁은 패널에서 아무 데서나 줄이 바뀌지 않게 항목마다 한 줄씩 쓴다
+    const costDetail = g.has_cost && costParts.length > 1 ? `<span class="cell-sub">${costParts.join('<br>')}</span>` : '';
+    const measured = g.quality_turns; // 품질 지표를 남기기 전의 턴뿐이면 0
+    return `
+      <tr>
+        <td>${g.label ? `<b>${escapeHtml(g.label)}</b><br>` : ''}${escapeHtml(g.model ?? '모델 기록 없음')}${conditions.length
+          ? `<span class="cell-sub">${conditions.map(escapeHtml).join(' · ')}</span>` : ''}</td>
+        <td>${g.turns}</td>
+        <td>${g.turns ? fmt(g.avg_input) : '–'}</td>
+        <td>${g.input_total ? `${Math.round(g.cache_hit_ratio * 100)}%` : '–'}</td>
+        <td>${g.has_cost ? usd(g.total_usd) : '–'}${costDetail}</td>
+        <td>${ms(g.avg_ttft_ms)}</td>
+        <td>${ms(g.avg_first_visible_ms)}</td>
+        <td>${measured ? `${ratio(g.avg_foreign_ratio)}<span class="cell-sub">로마자 ${ratio(g.avg_latin_ratio)}</span>` : '–'}</td>
+        <td>${measured ? ratio(g.avg_repeat_prev) : '–'}</td>
+        <td>${measured ? `${g.speech_shift_turns}/${measured}<span class="cell-sub">깃발 ${g.flagged_turns}턴</span>` : '–'}</td>
+      </tr>`;
+  }).join('');
+  const first = groups[0] || {};
+  const common = GROUP_FIELDS
+    .filter((f) => !varying.includes(f) && f !== 'label' && f !== 'model' && first[f] !== null && first[f] !== undefined)
+    .flatMap((f) => (f === 'options' ? optionTexts(first.options, Object.keys(first.options)) : [conditionText(f, first[f])]));
+  return `
+    <div class="table-scroll">
+      <table class="compare">
+        <thead><tr><th>설정</th><th>턴</th><th>입력</th><th>캐시</th><th>비용</th><th>첫 토큰</th><th>첫 표시</th>
+          <th>외국 문자</th><th>반복</th><th>말투 변화</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${common.length ? note(`모든 행에 같은 조건: ${common.map(escapeHtml).join(' · ')}`) : ''}
+    ${groups.some((g) => g.quality_turns) ? note('외국 문자는 한자·가나 등의 평균 비율(아래는 로마자), 반복은 직전 답과 겹친 글자 5-gram의 평균 비율, 말투 변화는 존댓말과 반말이 뒤바뀐 턴 수예요(아래는 깃발이 붙은 턴). 글자 모양과 어미만 보는 어림 지표예요.') : ''}`;
+}
+
 async function renderCompareTab() {
   const box = $('#tab-compare');
   if (!state.chatId) {
@@ -875,24 +1027,12 @@ async function renderCompareTab() {
       box.innerHTML = note('아직 사용량이 기록된 답변이 없어요.');
       return;
     }
-    const rows = data.groups.map((g) => `
-      <tr>
-        <td>${escapeHtml(g.model)}<br><span class="muted small-text">${STRATEGY_LABELS[g.strategy] || g.strategy}, 캐시 ${CACHE_LABELS[g.cache_mode] || g.cache_mode}</span></td>
-        <td>${g.turns}</td>
-        <td>${fmt(g.avg_input)}</td>
-        <td>${Math.round(g.cache_hit_ratio * 100)}%</td>
-        <td>${g.has_cost ? usd(g.usd) : '–'}</td>
-        <td>${ms(g.avg_ttft_ms)}</td>
-      </tr>`).join('');
     box.innerHTML = `
       <section class="panel-block">
         <h3>설정별 비교 (이 대화의 모든 가지)</h3>
-        <table class="compare">
-          <thead><tr><th>설정</th><th>턴</th><th>입력</th><th>캐시</th><th>비용</th><th>첫 토큰</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-        ${note('입력은 턴당 평균 입력 토큰, 캐시는 입력 중 캐시에서 읽은 비율, 비용은 합계, 첫 토큰은 평균이에요.')}
-        ${note('같은 대화에서 설정(창 전략, 캐시 방식, 모델)을 바꿔 가며 보내면 행이 나뉘어요. 비용은 가격표가 있는 모델만 계산해요(app/pricing.py, pricing.json).')}
+        ${compareTable(data.groups, data.varying)}
+        ${note('입력은 턴당 평균 입력 토큰, 캐시는 입력 중 캐시에서 읽은 비율, 비용은 대화에 요약과 LLM 검수 판정을 더한 합계, 첫 토큰과 첫 표시는 평균이에요.')}
+        ${note('실험 라벨, 모델, 창 전략, 입력 예산, 캐시 방식, 출력 버퍼, .env의 사고 설정, 프롬프트 파일 중 하나라도 다르면 행이 나뉘어요. 설정 칸에는 행마다 다른 조건만 보여요. 비용은 가격표가 있는 모델만 계산해요(app/pricing.py, pricing.json).')}
       </section>
       ${state.config?.settings.provider === 'mock' ? `
       <section class="panel-block">
@@ -975,6 +1115,147 @@ async function renderModTab() {
   }
 }
 
+/* ── 실험(대본 재생) 탭 ─────────────────────── */
+const experimentStatus = (status) => EXPERIMENT_STATUS[status] || escapeHtml(status);
+
+function experimentProgress(e) {
+  const p = e.progress || {};
+  return e.status === 'running'
+    ? `변형 ${p.variant}/${p.variants} · 턴 ${p.turn}/${p.turns}`
+    : `입력 ${p.turns ?? '?'}개 × 변형 ${p.variants ?? '?'}개`;
+}
+
+function experimentDetailHtml(e) {
+  const p = e.progress || {};
+  const done = Math.max(0, (p.variant - 1) * p.turns + p.turn);
+  const share = p.variants && p.turns ? done / (p.variants * p.turns) : 0;
+  const runs = e.runs.map((run) => `
+    <tr>
+      <td><b>${escapeHtml(run.label)}</b>${run.error ? `<span class="cell-sub">${escapeHtml(run.error)}</span>` : ''}</td>
+      <td>${experimentStatus(run.status)}</td>
+      <td>${run.turns_done}/${p.turns ?? '?'}</td>
+      <td>${run.blocked}</td>
+      <td>${run.chat_id ? `<button class="link-btn" type="button" data-open-chat="${run.chat_id}">대화 열기</button>` : '–'}</td>
+    </tr>`).join('');
+  const groups = e.stats?.groups || [];
+  return `
+    <section class="panel-block">
+      <h3>${escapeHtml(e.name)} <span class="status-chip ${escapeHtml(e.status)}">${experimentStatus(e.status)}</span></h3>
+      ${note(`${escapeHtml(e.character_name || '지워진 캐릭터')} · ${experimentProgress(e)}${e.spec?.reset_mock ? ' · 변형마다 mock 초기화' : ''}${e.spec?.wait_summary ? ' · 요약 기다림' : ''}`)}
+      ${e.status === 'running' ? `<div class="stack thin"><span class="seg-history" style="width:${Math.round(share * 100)}%"></span></div>` : ''}
+      ${e.error ? `<p class="panel-warn">${escapeHtml(e.error)}</p>` : ''}
+      <table class="compare runs">
+        <thead><tr><th>변형</th><th>상태</th><th>턴</th><th>막힘</th><th></th></tr></thead>
+        <tbody>${runs}</tbody>
+      </table>
+      <div class="row-actions">
+        ${e.status === 'running'
+          ? '<button class="btn ghost small" type="button" id="btn-cancel-experiment">취소</button>'
+          : '<button class="btn ghost small danger" type="button" id="btn-delete-experiment">기록 삭제</button>'}
+        ${groups.length ? `<a class="btn ghost small" href="/api/experiments/${e.id}/export.csv" download>CSV로 내려받기</a>` : ''}
+      </div>
+      ${e.status === 'running' ? '' : note('기록을 지워도 실험이 만든 대화는 남아요.')}
+    </section>
+    ${groups.length ? `
+    <section class="panel-block">
+      <h3>결과 비교${e.status === 'running' ? ' (진행 중)' : ''}</h3>
+      ${compareTable(groups, e.stats.varying)}
+      ${note('변형마다 새 대화에서 같은 대본을 처음부터 보낸 결과예요. 변형의 라벨이 실험 라벨이라 행이 변형별로 나뉘어요.')}
+    </section>` : ''}`;
+}
+
+function experimentsHtml(list, detail) {
+  const items = list.map((e) => `
+    <li class="${e.id === state.experimentId ? 'active' : ''}">
+      <button class="list-item" type="button" data-experiment="${e.id}">
+        <span class="grow">
+          <span class="title">${escapeHtml(e.name)}</span>
+          <span class="sub">${experimentStatus(e.status)} · ${experimentProgress(e)} · ${relativeTime(e.created_at)}</span>
+        </span>
+      </button>
+    </li>`).join('');
+  return `
+    <section class="panel-block">
+      <div class="panel-head">
+        <h3>대본 재생 실험</h3>
+        <button class="btn small" type="button" id="btn-new-experiment">새 실험</button>
+      </div>
+      ${note('입력 대본 하나를 여러 설정(변형)으로 새 대화에서 처음부터 자동으로 보내고, 결과를 비교 표로 보여 줘요. 한 번에 하나만 돌아요.')}
+      ${list.length ? `<ul class="exp-list">${items}</ul>` : note('아직 실험이 없어요.')}
+    </section>
+    ${detail ? experimentDetailHtml(detail) : ''}`;
+}
+
+async function openExperimentChat(experiment, chatId) {
+  if (experiment.character_id && experiment.character_id !== state.characterId) await selectCharacter(experiment.character_id);
+  else await refreshChatList();
+  await openChat(chatId);
+  if (window.matchMedia('(max-width: 1180px)').matches) $('#app').classList.remove('show-inspector');
+}
+
+function bindExperimentsTab(box, detail) {
+  $('#btn-new-experiment', box).addEventListener('click', openExperimentDialog);
+  $$('[data-experiment]', box).forEach((button) => button.addEventListener('click', () => {
+    state.experimentId = Number(button.dataset.experiment);
+    renderExperimentsTab();
+  }));
+  if (!detail) return;
+  $$('[data-open-chat]', box).forEach((button) => button.addEventListener('click', () =>
+    openExperimentChat(detail, Number(button.dataset.openChat)).catch((error) => toast(error.message))));
+  $('#btn-cancel-experiment', box)?.addEventListener('click', async (event) => {
+    event.target.disabled = true;
+    try {
+      await api(`/api/experiments/${detail.id}/cancel`, { method: 'POST' });
+      toast('실험을 취소했어요. 보내던 턴은 받은 만큼 저장돼요.');
+    } catch (error) {
+      toast(error.message);
+    }
+    renderExperimentsTab();
+  });
+  $('#btn-delete-experiment', box)?.addEventListener('click', async () => {
+    if (!window.confirm('이 실험 기록을 지울까요? 실험이 만든 대화는 남아요.')) return;
+    try {
+      await api(`/api/experiments/${detail.id}`, { method: 'DELETE' });
+      state.experimentId = null;
+    } catch (error) {
+      toast(error.message);
+    }
+    renderExperimentsTab();
+  });
+}
+
+async function renderExperimentsTab({ force = true } = {}) {
+  clearTimeout(state.experimentPoll);
+  const box = $('#tab-experiments');
+  const token = ++state.experimentRender; // 늦게 도착한 이전 응답이 화면을 덮지 않게 한다
+  let list;
+  let detail = null;
+  try {
+    list = await api('/api/experiments');
+    if (state.experimentId) detail = await api(`/api/experiments/${state.experimentId}`).catch(() => null);
+  } catch (error) {
+    if (token === state.experimentRender) box.innerHTML = note(escapeHtml(error.message));
+    return;
+  }
+  if (token !== state.experimentRender || state.tab !== 'experiments') return;
+  if (state.experimentId && !detail) state.experimentId = null;
+  const wasRunning = state.experiments.some((e) => e.status === 'running');
+  const running = list.some((e) => e.status === 'running');
+  state.experiments = list;
+  // 진행 중에는 1초마다 다시 불러온다. 바뀐 것이 없으면 다시 그리지 않아 스크롤과 포커스를 지킨다
+  const snapshot = JSON.stringify([list, detail]);
+  if (force || snapshot !== state.experimentSnapshot) {
+    state.experimentSnapshot = snapshot;
+    box.innerHTML = experimentsHtml(list, detail);
+    bindExperimentsTab(box, detail);
+  }
+  if (running) state.experimentPoll = setTimeout(() => renderExperimentsTab({ force: false }), 1000);
+  else if (wasRunning) {
+    refreshChatList(); // 실험이 만든 대화를 왼쪽 목록에 반영한다
+    loadCharacters();
+  }
+}
+
 /* ── 새 대화 ──────────────────────────────── */
 function openNewChat() {
   if (!state.characterId) {
@@ -1014,6 +1295,128 @@ async function submitNewChat(event) {
   }
 }
 
+/* ── 새 실험 ──────────────────────────────── */
+const scriptLines = () => $('#form-experiment').elements.inputs.value.split('\n').map((line) => line.trim()).filter(Boolean);
+
+function updateExperimentCount() {
+  const inputs = scriptLines().length;
+  const variants = $$('#variant-list .variant-entry').length;
+  $('#experiment-count').textContent = `입력 ${inputs}개 × 변형 ${variants}개 = 턴 ${inputs * variants}개`;
+}
+
+function addVariant(variant = { label: '', settings: {} }) {
+  const node = $('#tpl-variant').content.firstElementChild.cloneNode(true);
+  node.querySelector('[data-v="label"]').value = variant.label;
+  node.querySelector('[data-v="settings"]').value = JSON.stringify(variant.settings);
+  node.querySelector('[data-remove]').addEventListener('click', () => {
+    node.remove();
+    updateExperimentCount();
+  });
+  $('#variant-list').appendChild(node);
+  updateExperimentCount();
+  return node;
+}
+
+function openExperimentDialog() {
+  if (!state.characters.length) {
+    toast('먼저 캐릭터를 만들어 주세요.');
+    return;
+  }
+  const form = $('#form-experiment');
+  form.reset();
+  form.elements.character_id.innerHTML = state.characters.map((c) =>
+    `<option value="${c.id}" ${c.id === state.characterId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('');
+  form.elements.persona_name.value = store.get('personaName', '지우');
+  $('#variant-list').innerHTML = '';
+  addVariant({ label: '기본', settings: {} }); // 지금 설정 그대로 보내는 변형
+  $('#experiment-error').hidden = true;
+  $('#dlg-experiment').showModal();
+  form.elements.name.focus();
+}
+
+function fillExperimentExample() {
+  const form = $('#form-experiment');
+  const haram = state.characters.find((c) => c.name === '하람');
+  if (haram) form.elements.character_id.value = haram.id;
+  form.elements.name.value = '창 전략 비교 (실험 2)';
+  form.elements.inputs.value = SAMPLE_SCRIPT.join('\n');
+  $('#variant-list').innerHTML = '';
+  SAMPLE_VARIANTS.forEach((variant) => addVariant(variant));
+}
+
+/* 변형 줄을 읽는다. JSON을 읽지 못한 줄은 그 아래에 이유를 보여 주고 null을 돌려준다 */
+function collectVariants() {
+  let ok = true;
+  const variants = $$('#variant-list .variant-entry').map((node) => {
+    const error = node.querySelector('[data-error]');
+    error.hidden = true;
+    const label = node.querySelector('[data-v="label"]').value.trim();
+    const raw = node.querySelector('[data-v="settings"]').value.trim();
+    let settings = {};
+    try {
+      settings = raw ? JSON.parse(raw) : {};
+      if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+        throw new TypeError('설정은 {"이름": 값} 모양의 JSON 객체여야 해요.');
+      }
+    } catch (err) {
+      error.textContent = err instanceof SyntaxError ? `JSON을 읽지 못했어요: ${err.message}` : err.message;
+      error.hidden = false;
+      ok = false;
+    }
+    if (!label) {
+      error.textContent = '라벨을 입력하세요. 결과 표의 행 이름이 돼요.';
+      error.hidden = false;
+      ok = false;
+    }
+    return { label, settings };
+  });
+  return ok ? variants : null;
+}
+
+async function submitExperiment(event) {
+  event.preventDefault();
+  const form = event.target;
+  const errorBox = $('#experiment-error');
+  errorBox.hidden = true;
+  const variants = collectVariants();
+  if (!variants) return;
+  const inputs = scriptLines();
+  if (!inputs.length || !variants.length) {
+    errorBox.textContent = '입력 대본과 변형을 하나 이상 넣으세요.';
+    errorBox.hidden = false;
+    return;
+  }
+  // mock이 아닌 제공사로 보내는 변형이 있으면 실제 호출 횟수를 한 번 묻는다
+  const current = state.config?.settings.provider;
+  const paid = variants.filter((v) => (v.settings.provider || current) !== 'mock').length;
+  if (paid && !window.confirm(`실제 API를 ${inputs.length * paid}번 호출해요. 계속할까요?`)) return;
+  const seed = form.elements.seed.value.trim();
+  const body = {
+    name: form.elements.name.value.trim(),
+    character_id: Number(form.elements.character_id.value),
+    persona_name: form.elements.persona_name.value.trim(),
+    inputs,
+    variants,
+    reset_mock: form.elements.reset_mock.checked,
+    seed: seed === '' ? null : Number(seed),
+    wait_summary: form.elements.wait_summary.checked,
+    cooldown_seconds: Number(form.elements.cooldown_seconds.value || 0),
+  };
+  try {
+    const { id } = await api('/api/experiments', { json: body });
+    $('#dlg-experiment').close();
+    state.experimentId = id;
+    state.tab = 'experiments';
+    renderInspector();
+    if (window.matchMedia('(max-width: 1180px)').matches) $('#app').classList.add('show-inspector');
+    toast('실험을 시작했어요. 실험 탭에서 진행 상황을 볼 수 있어요.');
+  } catch (error) {
+    // 모달이 열려 있는 동안 토스트는 배경 뒤에 가려지므로 대화상자 안에 보여 준다
+    errorBox.textContent = error.message;
+    errorBox.hidden = false;
+  }
+}
+
 /* ── 설정 ─────────────────────────────────── */
 function settingField(key, settings, config) {
   const info = FIELD_INFO[key] || { label: key };
@@ -1031,6 +1434,9 @@ function settingField(key, settings, config) {
     return `<label class="field"><span>${info.label}</span><input name="model" value="${escapeHtml(value)}" placeholder="${escapeHtml(config.default_models[provider] || '모델 이름')}">${help}</label>`;
   }
   const spec = config.spec[key];
+  if (spec.type === 'text') {
+    return `<label class="field"><span>${info.label}</span><input name="${key}" type="text" maxlength="${spec.max_len}" value="${escapeHtml(settings[key] ?? '')}" placeholder="비우면 라벨 없음">${help}</label>`;
+  }
   if (spec.type === 'choice') {
     const options = spec.choices.map((choice) =>
       `<option value="${choice}" ${choice === settings[key] ? 'selected' : ''}>${escapeHtml(info.options?.[choice] || choice)}</option>`).join('');
@@ -1080,6 +1486,7 @@ async function submitSettings(event) {
     if (key === 'provider' || key === 'models' || !form.elements[key]) continue;
     const raw = form.elements[key].value;
     if (spec.type === 'choice') body[key] = raw;
+    else if (spec.type === 'text') body[key] = raw.trim(); // 빈 문자열도 보내야 라벨을 지울 수 있다
     else if (spec.type === 'int') body[key] = parseInt(raw, 10);
     else if (spec.type === 'float') body[key] = parseFloat(raw);
     else if (spec.type === 'float_or_none') body[key] = raw === '' ? null : parseFloat(raw);
@@ -1259,6 +1666,13 @@ function bindEvents() {
   $('#form-character').addEventListener('submit', submitCharacter);
   $('#btn-add-lore').addEventListener('click', () => addLoreEntry().querySelector('[data-k="name"]').focus());
   $('#btn-delete-character').addEventListener('click', deleteCharacter);
+  $('#form-experiment').addEventListener('submit', submitExperiment);
+  $('#form-experiment').elements.inputs.addEventListener('input', updateExperimentCount);
+  $('#btn-add-variant').addEventListener('click', () => {
+    const n = $$('#variant-list .variant-entry').length + 1;
+    addVariant({ label: `변형 ${n}`, settings: {} }).querySelector('[data-v="settings"]').focus();
+  });
+  $('#btn-experiment-example').addEventListener('click', fillExperimentExample);
   $$('[data-close]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
   $$('.tab').forEach((tab) => tab.addEventListener('click', () => {
     state.tab = tab.dataset.tab;

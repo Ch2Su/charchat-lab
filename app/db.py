@@ -3,6 +3,11 @@
 메시지는 트리로 저장한다(parent_id). 채팅의 active_leaf_id에서 부모를 따라
 루트까지 올라간 경로가 '지금 보고 있는 대화'다. 다시 생성(리롤)이나 수정은
 같은 부모 아래에 형제 노드를 하나 더 만드는 것이라, 이전 답변이 사라지지 않는다.
+
+스키마 버전은 PRAGMA user_version으로 관리한다. SCHEMA는 CREATE TABLE IF NOT EXISTS라서
+이미 만들어진 DB에는 새 표나 열이 생기지 않는다. 그래서 SCHEMA(버전 1)는 그대로 두고,
+바뀌는 부분은 MIGRATIONS에 버전을 붙여 덧붙인다. 열 때마다 DB 버전보다 높은 항목만
+트랜잭션 하나씩으로 적용하므로, 중간에 실패하면 그 버전은 통째로 되돌려진다.
 """
 from __future__ import annotations
 
@@ -102,6 +107,25 @@ CREATE TABLE IF NOT EXISTS settings(
 );
 """
 
+SCHEMA_VERSION_BASE = 1  # 지금의 SCHEMA가 버전 1이다
+
+# (버전, [SQL 문장, ...]). 버전은 2부터 1씩 올린다. 이미 배포된 항목은 고치지 않고 새 항목을 덧붙인다.
+MIGRATIONS: list[tuple[int, list[str]]] = [
+    # 2: 대본 재생 실험(app/experiments.py). 만들어진 대화는 chats에 있고, 여기는 요청과 진행 상황만 둔다.
+    (2, ["""CREATE TABLE experiments(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL DEFAULT '',
+  character_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+  spec TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress TEXT NOT NULL DEFAULT '{}',
+  runs TEXT NOT NULL DEFAULT '[]',
+  error TEXT,
+  created_at REAL NOT NULL,
+  finished_at REAL
+)"""]),
+]
+
 CHARACTER_TEXT_FIELDS = (
     "name", "description", "personality", "scenario", "first_mes", "mes_example",
     "system_prompt", "post_history_instructions", "creator_notes",
@@ -142,6 +166,29 @@ class DB:
         if self.path != ":memory:":
             self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        try:
+            self._migrate()
+        except BaseException:
+            self.conn.close()  # 열다 실패한 연결이 파일을 잡고 있지 않게 한다
+            raise
+
+    def _migrate(self) -> None:
+        current = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        latest = max([SCHEMA_VERSION_BASE, *(version for version, _ in MIGRATIONS)])
+        if current > latest:
+            raise RuntimeError(f"이 DB는 더 새로운 버전의 코드로 만들어졌어요 (DB {current}, 코드 {latest}).")
+        if current == 0:  # 새 DB이거나 마이그레이션 도입 전의 DB
+            current = SCHEMA_VERSION_BASE
+            self.conn.execute(f"PRAGMA user_version = {current}")
+        for version, statements in sorted(MIGRATIONS, key=lambda item: item[0]):
+            if version <= current:
+                continue
+            # executescript는 실행 전에 암묵적으로 COMMIT해서 롤백이 깨지므로 한 문장씩 실행한다
+            with self.tx():
+                for sql in statements:
+                    self.conn.execute(sql)
+                self.conn.execute(f"PRAGMA user_version = {int(version)}")
+            current = version
 
     # ── 기본 쿼리 ──────────────────────────────────
     def q(self, sql: str, params: tuple | list = ()) -> list[dict]:
@@ -464,6 +511,59 @@ class DB:
         if row:
             row["payload"] = _loads(row["payload"], {})
         return row
+
+    # ── 실험 ──────────────────────────────────────
+    @staticmethod
+    def _experiment_row(row: dict) -> dict:
+        row["spec"] = _loads(row.get("spec"), {})
+        row["progress"] = _loads(row.get("progress"), {})
+        row["runs"] = _loads(row.get("runs"), [])
+        return row
+
+    def create_experiment(self, name: str, character_id: int | None, spec: dict, status: str = "running") -> int:
+        return self.exec(
+            "INSERT INTO experiments(name, character_id, spec, status, created_at) VALUES(?,?,?,?,?)",
+            (name, character_id, _dumps(spec), status, _now()),
+        )
+
+    def get_experiment(self, experiment_id: int) -> dict | None:
+        row = self.one(
+            """SELECT e.*, c.name AS character_name FROM experiments e
+               LEFT JOIN characters c ON c.id = e.character_id WHERE e.id=?""",
+            (experiment_id,),
+        )
+        return self._experiment_row(row) if row else None
+
+    def list_experiments(self, limit: int = 50) -> list[dict]:
+        rows = self.q(
+            """SELECT e.*, c.name AS character_name FROM experiments e
+               LEFT JOIN characters c ON c.id = e.character_id ORDER BY e.id DESC LIMIT ?""",
+            (limit,),
+        )
+        return [self._experiment_row(r) for r in rows]
+
+    def update_experiment(self, experiment_id: int, **fields) -> None:
+        sets, params = [], []
+        for key, value in fields.items():
+            if key in ("progress", "runs"):
+                value = _dumps(value)
+            elif key not in ("status", "error", "finished_at"):
+                continue
+            sets.append(f"{key}=?")
+            params.append(value)
+        if sets:
+            self.exec(f"UPDATE experiments SET {', '.join(sets)} WHERE id=?", (*params, experiment_id))
+
+    def delete_experiment(self, experiment_id: int) -> None:
+        self.exec("DELETE FROM experiments WHERE id=?", (experiment_id,))
+
+    def interrupt_running_experiments(self) -> int:
+        """서버가 꺼지면서 끊긴 실험(running으로 남은 행)을 interrupted로 바꾼다. 서버를 켤 때 부른다."""
+        with self._lock:
+            cur = self.conn.execute(
+                "UPDATE experiments SET status='interrupted', finished_at=? WHERE status='running'", (_now(),)
+            )
+            return cur.rowcount
 
     # ── 설정 ──────────────────────────────────────
     def get_setting_overrides(self) -> dict:

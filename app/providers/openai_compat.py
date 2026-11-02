@@ -172,6 +172,13 @@ class OpenAICompatProvider(Provider):
             payload["reasoning_effort"] = config.OPENAI_COMPAT_REASONING_EFFORT
         return payload
 
+    def options(self) -> dict:
+        return {
+            "reasoning_effort": config.OPENAI_COMPAT_REASONING_EFFORT,
+            "top_p": config.OPENAI_COMPAT_TOP_P,
+            "max_tokens_param": config.OPENAI_COMPAT_MAX_TOKENS_PARAM,
+        }
+
     def render(self, req: ChatRequest) -> dict:
         system = req.fixed_system + (f"\n\n{req.summary}" if req.summary else "")
         payload = self._options({
