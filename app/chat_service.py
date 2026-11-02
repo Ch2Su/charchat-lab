@@ -506,7 +506,7 @@ class ChatService:
                     "turns": 0, "input_total": 0, "cache_read": 0, "cache_write": 0, "output": 0,
                     "usd": 0.0, "no_cache_usd": 0.0, "has_cost": False,
                     "judge_calls": 0, "judge_usd": 0.0, "summary_calls": 0, "summary_usd": 0.0,
-                    "quality_turns": 0, "speech_shift_turns": 0, "flagged_turns": 0,
+                    "quality_turns": 0, "foreign_turns": 0, "speech_shift_turns": 0, "flagged_turns": 0,
                     "_ttft": [], "_first_visible": [], "_foreign": 0.0, "_latin": 0.0, "_repeat_prev": 0.0,
                 }
             return groups[key]
@@ -551,6 +551,7 @@ class ChatService:
             if measured:
                 group["quality_turns"] += 1
                 group["_foreign"] += measured.get("foreign_ratio") or 0
+                group["foreign_turns"] += bool(measured.get("foreign_ratio"))  # 비율이 낮아도 한 글자라도 낀 턴
                 group["_latin"] += measured.get("latin_ratio") or 0
                 group["_repeat_prev"] += measured.get("repeat_prev") or 0
                 group["speech_shift_turns"] += bool(measured.get("speech_shift"))
@@ -582,8 +583,17 @@ class ChatService:
         def average(values: list) -> int | None:
             return round(sum(values) / len(values)) if values else None
 
+        def median(values: list) -> int | None:
+            if not values:
+                return None
+            ordered, mid = sorted(values), len(values) // 2
+            return round(ordered[mid] if len(values) % 2 else (ordered[mid - 1] + ordered[mid]) / 2)
+
         result = []
         for group in groups.values():
+            # 로컬 모델은 첫 턴에 모델을 올리는 시간이 섞여 평균이 치우치므로 중앙값도 함께 낸다
+            group["median_ttft_ms"] = median(group["_ttft"])
+            group["median_first_visible_ms"] = median(group["_first_visible"])
             group["avg_ttft_ms"] = average(group.pop("_ttft"))
             group["avg_first_visible_ms"] = average(group.pop("_first_visible"))
             group["avg_input"] = round(group["input_total"] / group["turns"]) if group["turns"] else 0

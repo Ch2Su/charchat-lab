@@ -993,9 +993,9 @@ function compareTable(groups, varying) {
         <td>${g.turns ? fmt(g.avg_input) : '–'}</td>
         <td>${g.input_total ? `${Math.round(g.cache_hit_ratio * 100)}%` : '–'}</td>
         <td>${g.has_cost ? usd(g.total_usd) : (g.turns ? '가격표 없음' : '–')}${costDetail}</td>
-        <td>${ms(g.avg_ttft_ms)}</td>
-        <td>${ms(g.avg_first_visible_ms)}</td>
-        <td>${measured ? `${ratio(g.avg_foreign_ratio)}<span class="cell-sub">로마자 ${ratio(g.avg_latin_ratio)}</span>` : '–'}</td>
+        <td>${ms(g.avg_ttft_ms)}${g.turns > 1 ? `<span class="cell-sub">중앙값 ${ms(g.median_ttft_ms)}</span>` : ''}</td>
+        <td>${ms(g.avg_first_visible_ms)}${g.turns > 1 ? `<span class="cell-sub">중앙값 ${ms(g.median_first_visible_ms)}</span>` : ''}</td>
+        <td>${measured ? `${ratio(g.avg_foreign_ratio)}<span class="cell-sub">낀 턴 ${g.foreign_turns}/${measured}<br>로마자 ${ratio(g.avg_latin_ratio)}</span>` : '–'}</td>
         <td>${measured ? ratio(g.avg_repeat_prev) : '–'}</td>
         <td>${measured ? `${g.speech_shift_turns}/${measured}<span class="cell-sub">깃발 ${g.flagged_turns}턴</span>` : '–'}</td>
       </tr>`;

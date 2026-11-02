@@ -62,7 +62,9 @@ def _sentences(text: str) -> list[str]:
 
 def _endings(text: str) -> list[str]:
     """문장마다 마지막 한글 어절의 끝(문장부호·기호를 뗀 음절들)."""
-    quotes = [a or b for a, b in _QUOTE.findall(text)]
+    # 작은 모델은 큰따옴표를 닫지 않는 일이 잦다. 짝이 안 맞으면 짝짓기가 어긋나 묘사나 엉뚱한 구간이 대사로 잡히므로
+    # 대사를 따로 가려내지 않고 묘사(*별표*)만 뺀 글 전체를 본다
+    quotes = [a or b for a, b in _QUOTE.findall(text)] if text.count('"') % 2 == 0 else []
     source = "\n".join(quotes) if quotes else _ACTION.sub(" ", text)
     endings = []
     for sentence in _SENTENCE_END.split(source):

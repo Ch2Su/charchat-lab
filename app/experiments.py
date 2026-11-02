@@ -34,9 +34,9 @@ MAX_COOLDOWN_SECONDS = 600
 CACHE_TTL_SECONDS = 300
 
 CSV_FIELDS = (*GROUP_FIELDS, "turns", "avg_input", "cache_hit_ratio", "usd", "judge_calls", "judge_usd",
-              "summary_calls", "summary_usd", "total_usd", "avg_ttft_ms", "avg_first_visible_ms",
-              "quality_turns", "avg_foreign_ratio", "avg_latin_ratio", "avg_repeat_prev", "speech_shift_turns",
-              "flagged_turns")
+              "summary_calls", "summary_usd", "total_usd", "avg_ttft_ms", "median_ttft_ms", "avg_first_visible_ms",
+              "median_first_visible_ms", "quality_turns", "avg_foreign_ratio", "foreign_turns", "avg_latin_ratio",
+              "avg_repeat_prev", "speech_shift_turns", "flagged_turns")
 
 
 def _sse_error(chunk: str) -> str | None:
