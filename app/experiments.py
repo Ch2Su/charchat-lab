@@ -193,8 +193,9 @@ class ExperimentRunner:
             "paid_calls": sum(row["chat_calls"] + row["judge_calls"] for row in paid),
             "paid_max_usd": round(sum(row["max_usd"] or 0 for row in paid), 6),
             "unpriced": [row["label"] for row in paid if row["max_usd"] is None],
-            # 실제 제공사 변형이 둘 이상인데 캐시가 만료될 만큼 기다리지 않으면 앞 변형의 캐시가 뒤 변형에 섞인다
-            "cache_overlap": len(paid) > 1 and cooldown < CACHE_TTL_SECONDS,
+            # 같은 모델로 보내는 변형이 둘 이상인데 캐시가 만료될 만큼 기다리지 않으면 앞 변형의 캐시가 뒤 변형에 섞인다
+            # (캐시는 모델마다 따로 있어서 모델이 다른 변형끼리는 섞이지 않는다)
+            "cache_overlap": cooldown < CACHE_TTL_SECONDS and len({(r["provider"], r["model"]) for r in paid}) < len(paid),
             "cooldown_seconds": cooldown,
             "cache_ttl_seconds": CACHE_TTL_SECONDS,
         }

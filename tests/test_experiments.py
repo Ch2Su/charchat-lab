@@ -181,6 +181,9 @@ def test_estimate_counts_paid_calls_and_warns_about_shared_cache(client, haram_i
     assert data["cache_overlap"] is True  # 실제 제공사 변형 둘이 기다림 없이 이어지면 캐시가 섞인다
 
     assert client.post("/api/experiments/estimate", json={**payload, "cooldown_seconds": 300}).json()["cache_overlap"] is False
+    other = {**real, "models": {"openai_compat": "other-model"}}  # 캐시는 모델마다 따로라서 모델이 다르면 섞이지 않는다
+    different = {**payload, "variants": [{"label": "실제A", "settings": real}, {"label": "실제C", "settings": other}]}
+    assert client.post("/api/experiments/estimate", json=different).json()["cache_overlap"] is False
     unpriced = {**payload, "variants": [{"label": "값없음", "settings": {**real, "models": {"openai_compat": "no-price"}}}]}
     assert client.post("/api/experiments/estimate", json=unpriced).json()["unpriced"] == ["값없음"]
     assert client.post("/api/experiments/estimate", json={**payload, "inputs": []}).status_code == 400  # start와 같은 검증
