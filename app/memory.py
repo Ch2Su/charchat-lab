@@ -15,11 +15,12 @@ from __future__ import annotations
 import asyncio
 import time
 
-from . import config
+from . import config, pricing
 from .cards import apply_macros
 from .db import DB
 from .prompt import Msg, fill, load_prompt, persona_name
 from .providers import ProviderError, get_provider
+from .runinfo import run_info
 
 MIN_AUTO_CHUNK = 4
 
@@ -86,6 +87,7 @@ async def summarize(db: DB, chat_id: int, chunk: list[Msg], previous: dict | Non
     text = result.text.strip()
     if not text:
         raise ProviderError("요약 결과가 비어 있어요.")
+    usage = result.usage.to_dict()
     summary_id = db.add_summary(chat_id, chunk[-1].id, text, meta={
         "provider": provider.name,
         "model": model,
@@ -93,7 +95,10 @@ async def summarize(db: DB, chat_id: int, chunk: list[Msg], previous: dict | Non
         "covered_tokens_est": sum(m.tokens for m in chunk),
         "previous_id": previous["id"] if previous else None,
         "latency_ms": round((time.perf_counter() - started) * 1000),
-        "usage": result.usage.to_dict(),
+        "usage": usage,
+        # 어느 조건의 대화에서 생긴 요약인지(run의 model은 대화 모델), 비용은 실제 요약 모델 기준
+        "run": run_info(settings, provider),
+        "cost": pricing.cost(usage, provider.name, model),
     })
     db.add_prompt_log(chat_id, None, "summary", {
         "provider": provider.name, "model": model, "system": system, "user": prompt, "output": text,

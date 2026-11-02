@@ -143,6 +143,8 @@ SETTINGS_SPEC: dict[str, dict] = {
     "moderation_mode": {"type": "choice", "choices": ["block", "log", "off"], "default": env("MODERATION_MODE", "block")},
     "moderation_backend": {"type": "choice", "choices": ["rules", "llm"], "default": env("MODERATION_BACKEND", "rules")},
     "output_buffer": {"type": "choice", "choices": ["sentence", "none"], "default": env("OUTPUT_BUFFER", "sentence")},
+    # 실험 라벨: 비교 탭에서 이 이름으로 행을 나눈다
+    "run_label": {"type": "text", "max_len": 40, "default": ""},
 }
 
 
@@ -177,6 +179,8 @@ def coerce_setting(key: str, value):
         if not isinstance(value, dict):
             raise SettingsError("models: {제공사: 모델} 형태여야 합니다")
         return {k: str(v).strip() for k, v in value.items() if k in PROVIDERS}
+    if kind == "text":
+        return "" if value is None else str(value).strip()[: spec["max_len"]]
     raise SettingsError(f"{key}: 지원하지 않는 형식")
 
 

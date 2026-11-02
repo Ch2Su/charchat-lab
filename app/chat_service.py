@@ -12,6 +12,10 @@
   notice   입력이 막혔거나 위기 안내를 띄움
   error    제공사 오류
   done     최종 저장된 메시지
+
+턴마다 meta.run에 실행 조건(runinfo.run_info)을, meta.aux에 대화 밖 보조 호출(LLM 검수 판정)의
+사용량과 비용을 남긴다. 집계(stats_for_chats)는 실행 조건이 하나라도 다르면 행을 나누고,
+본 대화 비용에 검수·요약 비용을 더해 '숨은 비용'까지 보여 준다.
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ from .db import DB
 from .moderation import ModResult
 from .prompt import assemble, load_prompt, persona_name
 from .providers import ChatRequest, Provider, ProviderError, get_provider
+from .runinfo import run_info
 
 BLOCK_NOTICE = "입력이 검수 기준(분류: {category})에 걸려 모델에 보내지 않았어요. 오른쪽 검수 로그에서 자세히 볼 수 있어요."
 RETRACT_NOTICE = "(검수 기준에 걸려 가려진 응답이에요. 분류: {category})"
@@ -35,6 +40,11 @@ THINKING_ONLY_NOTICE = {
     "other": "(사고만 하고 답변 없이 끝났어요. 다시 생성해 보세요.)",
 }
 THINKING_SSE_INTERVAL_MS = 300
+
+# 비교 탭에서 행을 나누는 실행 조건(meta.run의 키). moderation_mode는 비용·지연에 영향이 없어 뺐다.
+GROUP_FIELDS = ("label", "provider", "model", "strategy", "cache_mode", "input_token_budget",
+                "max_output_tokens", "temperature", "moderation_backend", "output_buffer",
+                "options", "prompt_version")
 
 
 class TurnError(Exception):
@@ -51,6 +61,15 @@ def sse(event: str, data: dict) -> str:
 
 def _ms(started: float) -> int:
     return round((time.perf_counter() - started) * 1000)
+
+
+def aux_entry(purpose: str, check: ModResult | None) -> dict | None:
+    """LLM 판정처럼 대화 밖에서 부른 호출의 사용량과 비용. 판정을 안 했으면 None."""
+    if not check or check.backend != "llm" or not check.usage:
+        return None
+    return {"purpose": purpose, "provider": check.provider, "model": check.model,
+            "usage": check.usage, "cost": pricing.cost(check.usage, check.provider, check.model),
+            "latency_ms": round(check.latency_ms, 1)}
 
 
 class ChatService:
@@ -170,7 +189,10 @@ class ChatService:
                 user_id = self.db.add_message(chat["id"], parent_id, "user", content, meta=meta, excluded=True)
                 kind = "crisis" if crisis else "blocked"
                 text = load_prompt("crisis.txt") if crisis else BLOCK_NOTICE.format(category=result.category)
-                notice_id = self.db.add_message(chat["id"], user_id, "notice", text, meta={"kind": kind})
+                # 답변이 없어도 입력 판정 비용은 들었으므로 안내 메시지에 실행 조건과 함께 남긴다
+                aux = [e for e in [aux_entry("judge_input", result)] if e]
+                notice_id = self.db.add_message(chat["id"], user_id, "notice", text,
+                                                meta={"kind": kind, "run": run_info(settings, provider), "aux": aux})
                 self.db.set_active_leaf(chat["id"], notice_id)
                 self._log_mod("input", result, kind, content, chat=chat, message_id=user_id)
                 yield sse("notice", {"kind": kind, "text": text, "user_message_id": user_id, "notice_id": notice_id})
@@ -210,16 +232,8 @@ class ChatService:
         )
         payload = provider.render(req)
         diagnostics = asm.diagnostics()
-        run = {
-            "provider": provider.name,
-            "model": model,
-            "strategy": settings["window_strategy"],
-            "cache_mode": settings["cache_mode"],
-            "input_token_budget": settings["input_token_budget"],
-            "moderation_mode": settings["moderation_mode"],
-            "moderation_backend": settings["moderation_backend"],
-            "output_buffer": settings["output_buffer"],
-        }
+        run = run_info(settings, provider)
+        aux = [e for e in [aux_entry("judge_input", input_check)] if e]
         yield sse("meta", {"user_message_id": user_msg["id"], "diagnostics": diagnostics, "run": run})
 
         mode = settings["moderation_mode"]
@@ -289,6 +303,7 @@ class ChatService:
                 "finish_reason": finish,
                 "finish_detail": detail,
                 "error": error,
+                "aux": list(aux),
             }
 
         try:
@@ -369,6 +384,9 @@ class ChatService:
 
         meta = base_meta("error" if error else "complete")
         meta["latency"]["output_moderation_ms"] = round(output_check.latency_ms, 1) if output_check else None
+        judged = aux_entry("judge_output", output_check)
+        if judged:
+            meta["aux"].append(judged)
         content, excluded = shown_text, False
         if retracted:
             content, excluded = RETRACT_NOTICE.format(category=retracted.category), True
@@ -460,19 +478,49 @@ class ChatService:
 
     def stats(self, chat_id: int) -> dict:
         self._chat(chat_id)
-        rows = self.db.q("SELECT meta FROM messages WHERE chat_id=? AND role='assistant'", (chat_id,))
+        return self.stats_for_chats([chat_id])
+
+    def stats_for_chats(self, chat_ids: list[int]) -> dict:
+        """대화들의 턴을 실행 조건(GROUP_FIELDS)별로 묶어 사용량, 비용, 지연을 더한다.
+
+        본 대화 비용(usd)에 LLM 검수 판정(meta.aux)과 요약(summaries.meta) 비용을 따로 더해
+        total_usd로 보여 준다. 옛 메시지처럼 run에 없는 필드는 None으로 묶인다.
+        """
         groups: dict[tuple, dict] = {}
+
+        def group_for(run: dict) -> dict:
+            key = tuple(json.dumps(run.get(f), sort_keys=True, ensure_ascii=False) for f in GROUP_FIELDS)
+            if key not in groups:
+                groups[key] = {
+                    **{f: run.get(f) for f in GROUP_FIELDS},
+                    "turns": 0, "input_total": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+                    "usd": 0.0, "no_cache_usd": 0.0, "has_cost": False,
+                    "judge_calls": 0, "judge_usd": 0.0, "summary_calls": 0, "summary_usd": 0.0,
+                    "_ttft": [], "_first_visible": [],
+                }
+            return groups[key]
+
+        ids = [int(i) for i in chat_ids]
+        marks = ",".join("?" for _ in ids)
+        rows = self.db.q(
+            f"SELECT role, meta FROM messages WHERE chat_id IN ({marks}) AND role IN ('assistant', 'notice') "
+            "ORDER BY id", ids) if ids else []
         for row in rows:
             meta = json.loads(row["meta"] or "{}")
             run, usage = meta.get("run"), meta.get("usage")
-            if not run or not usage:
+            judges = [e for e in meta.get("aux") or [] if str(e.get("purpose", "")).startswith("judge")]
+            # 안내(notice)는 검수 비용만 더한다. 더할 것이 없는 메시지로는 빈 행을 만들지 않는다
+            is_turn = row["role"] == "assistant" and bool(usage)
+            if not run or not (is_turn or judges):
                 continue
-            key = (run["provider"], run["model"], run["strategy"], run["cache_mode"])
-            group = groups.setdefault(key, {
-                "provider": key[0], "model": key[1], "strategy": key[2], "cache_mode": key[3],
-                "turns": 0, "input_total": 0, "cache_read": 0, "cache_write": 0, "output": 0,
-                "usd": 0.0, "no_cache_usd": 0.0, "has_cost": False, "_ttft": [],
-            })
+            group = group_for(run)
+            for entry in judges:
+                group["judge_calls"] += 1
+                if entry.get("cost"):
+                    group["has_cost"] = True
+                    group["judge_usd"] += entry["cost"]["usd"]
+            if not is_turn:
+                continue
             group["turns"] += 1
             for field in ("input_total", "cache_read", "cache_write", "output"):
                 group[field] += usage.get(field, 0) or 0
@@ -480,14 +528,35 @@ class ChatService:
                 group["has_cost"] = True
                 group["usd"] += meta["cost"]["usd"]
                 group["no_cache_usd"] += meta["cost"]["no_cache_usd"]
-            ttft = (meta.get("latency") or {}).get("ttft_ms")
-            if ttft is not None:
-                group["_ttft"].append(ttft)
+            latency = meta.get("latency") or {}
+            if latency.get("ttft_ms") is not None:
+                group["_ttft"].append(latency["ttft_ms"])
+            if latency.get("first_visible_ms") is not None:
+                group["_first_visible"].append(latency["first_visible_ms"])
+
+        summaries = self.db.q(f"SELECT meta FROM summaries WHERE chat_id IN ({marks}) ORDER BY id", ids) if ids else []
+        for row in summaries:
+            meta = json.loads(row["meta"] or "{}")
+            if not meta.get("run"):  # 실행 조건을 남기기 전의 옛 요약은 어느 행인지 알 수 없다
+                continue
+            group = group_for(meta["run"])
+            group["summary_calls"] += 1
+            if meta.get("cost"):
+                group["has_cost"] = True
+                group["summary_usd"] += meta["cost"]["usd"]
+
+        def average(values: list) -> int | None:
+            return round(sum(values) / len(values)) if values else None
+
         result = []
         for group in groups.values():
-            ttfts = group.pop("_ttft")
-            group["avg_ttft_ms"] = round(sum(ttfts) / len(ttfts)) if ttfts else None
+            group["avg_ttft_ms"] = average(group.pop("_ttft"))
+            group["avg_first_visible_ms"] = average(group.pop("_first_visible"))
             group["avg_input"] = round(group["input_total"] / group["turns"]) if group["turns"] else 0
             group["cache_hit_ratio"] = round(group["cache_read"] / group["input_total"], 4) if group["input_total"] else 0
+            for field in ("usd", "no_cache_usd", "judge_usd", "summary_usd"):
+                group[field] = round(group[field], 8)
+            group["total_usd"] = round(group["usd"] + group["judge_usd"] + group["summary_usd"], 8)
             result.append(group)
-        return {"groups": result}
+        varying = [f for i, f in enumerate(GROUP_FIELDS) if len({key[i] for key in groups}) > 1]
+        return {"varying": varying, "groups": result}

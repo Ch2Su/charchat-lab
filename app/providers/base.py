@@ -73,5 +73,9 @@ class Provider:
         """요약·검수용 단발 호출."""
         raise NotImplementedError
 
+    def options(self) -> dict:
+        """요청을 만들 때 읽는 .env 옵션(사고 수준 등). 실행 조건으로 턴마다 기록한다."""
+        return {}
+
     async def aclose(self) -> None:
         return None

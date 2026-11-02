@@ -77,6 +77,13 @@ class GeminiProvider(Provider):
             cfg["thinking_config"] = {"thinking_level": config.GEMINI_THINKING_LEVEL}
         return cfg
 
+    def options(self) -> dict:
+        return {
+            "thinking_level": config.GEMINI_THINKING_LEVEL,
+            "thinking_headroom": max(0, config.GEMINI_THINKING_HEADROOM),
+            "safety_threshold": config.GEMINI_SAFETY_THRESHOLD,
+        }
+
     def render(self, req: ChatRequest) -> dict:
         system = req.fixed_system + (f"\n\n{req.summary}" if req.summary else "")
         contents = [

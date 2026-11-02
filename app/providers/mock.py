@@ -133,6 +133,13 @@ class MockProvider(Provider):
         payload["_note"] = "mock 제공사: 실제로 전송되지 않으며, Anthropic 형식으로 캐시를 흉내 낸다."
         return payload
 
+    def options(self) -> dict:
+        return {
+            "delay_scale": config.MOCK_DELAY_SCALE,
+            "cache_min_tokens": self.cache.min_tokens,
+            "cache_ttl": self.cache.ttl,
+        }
+
     def _reply(self, req: ChatRequest) -> str:
         hints = req.hints or {}
         char, user = hints.get("char", "캐릭터"), hints.get("user", "사용자")

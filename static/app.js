@@ -47,7 +47,7 @@ const FINISH_LABELS = {
 };
 
 const SETTING_GROUPS = [
-  { title: '모델', fields: ['provider', 'model'] },
+  { title: '모델', fields: ['provider', 'model', 'run_label'] },
   { title: '창과 요약', fields: ['window_strategy', 'input_token_budget', 'summary_trigger_ratio', 'summary_keep_ratio'] },
   { title: '캐시와 로어북', fields: ['cache_mode', 'lore_scan_depth', 'lore_token_budget'] },
   { title: '생성', fields: ['max_output_tokens', 'temperature'] },
@@ -86,7 +86,20 @@ const FIELD_INFO = {
     label: '출력 버퍼',
     options: { sentence: '문장 단위로 검사한 뒤 표시', none: '바로 표시하고 끝난 뒤 검사' },
   },
+  run_label: { label: '실험 라벨', help: '비교 탭에서 이 이름으로 행을 나눠요. 비우면 라벨 없이 기록해요.' },
 };
+
+// 비교 표: 행을 나누는 실행 조건(서버의 GROUP_FIELDS)과, 조건 이름·값을 짧게 보여 줄 때 쓰는 표
+const GROUP_FIELDS = ['label', 'provider', 'model', 'strategy', 'cache_mode', 'input_token_budget',
+  'max_output_tokens', 'temperature', 'moderation_backend', 'output_buffer', 'options', 'prompt_version'];
+const GROUP_FIELD_INFO_KEYS = { label: 'run_label', strategy: 'window_strategy' };
+const GROUP_VALUE_LABELS = {
+  strategy: STRATEGY_LABELS,
+  cache_mode: CACHE_LABELS,
+  moderation_backend: { rules: '규칙', llm: 'LLM 판정' },
+  output_buffer: { sentence: '문장 단위', none: '바로 표시' },
+};
+const AUX_LABELS = { judge_input: '입력', judge_output: '출력' };
 
 /* ── 유틸 ─────────────────────────────────── */
 const numberFormat = new Intl.NumberFormat('ko-KR');
@@ -316,7 +329,9 @@ function renderModelChip() {
   const config = state.config;
   if (!config) return;
   const settings = config.settings;
-  $('#chip-model').innerHTML = `<strong>${escapeHtml(config.model || '모델 미지정')}</strong> ${STRATEGY_LABELS[settings.window_strategy]}`;
+  // 라벨을 켜 둔 채 잊으면 다음 턴들도 그 라벨로 묶이므로 늘 보이게 둔다
+  const label = settings.run_label ? ` · 라벨 ${escapeHtml(settings.run_label)}` : '';
+  $('#chip-model').innerHTML = `<strong>${escapeHtml(config.model || '모델 미지정')}</strong> ${STRATEGY_LABELS[settings.window_strategy]}${label}`;
   const hint = $('#composer-hint');
   const parts = ['Enter로 보내고 Shift+Enter로 줄을 바꿔요.'];
   if (settings.provider === 'mock') parts.push('mock 테스트 명령: /long, /mod-test-output, /error, /slow, /think, /think-leak');
@@ -770,17 +785,21 @@ function turnHtml(meta, messageId, pending) {
     html += `<section class="panel-block"><h3>실제 입력 토큰</h3>${note('사용량 정보가 없어요. 중간에 멈췄거나 검수로 스트림을 끊은 경우예요.')}</section>`;
   }
 
-  if (meta.cost) {
-    const saved = meta.cost.no_cache_usd ? 1 - meta.cost.usd / meta.cost.no_cache_usd : 0;
+  const aux = meta.aux || [];
+  if (meta.cost || aux.length) {
+    const saved = meta.cost?.no_cache_usd ? 1 - meta.cost.usd / meta.cost.no_cache_usd : 0;
     html += `
       <section class="panel-block">
         <h3>비용</h3>
         <dl class="kv">
+          ${meta.cost ? `
           <dt>이번 턴</dt><dd>${usd(meta.cost.usd)}</dd>
           <dt>캐시가 없었다면</dt><dd>${usd(meta.cost.no_cache_usd)}</dd>
-          <dt>캐시 효과</dt><dd>${saved >= 0 ? `${Math.round(saved * 100)}% 절약` : `${Math.round(-saved * 100)}% 더 듦`}</dd>
+          <dt>캐시 효과</dt><dd>${saved >= 0 ? `${Math.round(saved * 100)}% 절약` : `${Math.round(-saved * 100)}% 더 듦`}</dd>` : ''}
+          ${aux.map((a) => `<dt>검수 판정 (${AUX_LABELS[a.purpose] || escapeHtml(a.purpose)})</dt><dd>${a.cost ? usd(a.cost.usd) : '–'} · ${ms(a.latency_ms)}</dd>`).join('')}
         </dl>
         ${saved < 0 ? note('처음 캐시에 쓰는 턴은 쓰기 비용(1.25배) 때문에 오히려 비싸요. 다음 턴부터 읽기(0.1배)로 돌려받아요.') : ''}
+        ${aux.length ? note('검수 판정은 대화와 따로 부르는 LLM 호출이에요. 이번 턴 비용에는 들어가지 않고, 비교 탭의 비용 합계에는 들어가요.') : ''}
         ${run.provider === 'mock' ? note('mock은 Claude Haiku 5.5 가격으로 흉내 낸 값이에요.') : ''}
       </section>`;
   }
@@ -836,15 +855,21 @@ function turnHtml(meta, messageId, pending) {
     </section>`;
 
   if (run.provider) {
+    const options = Object.entries(run.options || {}).map(([k, v]) => `${k} ${v ?? '기본'}`).join(', ');
     html += `
       <section class="panel-block">
         <h3>실행 설정</h3>
         <dl class="kv">
+          ${run.label ? `<dt>실험 라벨</dt><dd>${escapeHtml(run.label)}</dd>` : ''}
           <dt>제공사</dt><dd>${escapeHtml(run.provider)}</dd>
           <dt>모델</dt><dd>${escapeHtml(run.model)}</dd>
+          ${run.input_token_budget ? `<dt>입력 예산</dt><dd>${fmt(run.input_token_budget)}</dd>` : ''}
+          ${run.max_output_tokens ? `<dt>최대 출력</dt><dd>${fmt(run.max_output_tokens)}</dd>` : ''}
           <dt>캐시 방식</dt><dd>${CACHE_LABELS[run.cache_mode] || run.cache_mode}</dd>
           <dt>검수</dt><dd>${escapeHtml(run.moderation_mode)}, ${escapeHtml(run.moderation_backend)}</dd>
           <dt>출력 버퍼</dt><dd>${escapeHtml(run.output_buffer)}</dd>
+          ${options ? `<dt>.env 옵션</dt><dd>${escapeHtml(options)}</dd>` : ''}
+          ${run.prompt_version ? `<dt>프롬프트 버전</dt><dd>${escapeHtml(run.prompt_version)}</dd>` : ''}
           ${meta.finish_reason ? `<dt>종료 이유</dt><dd>${FINISH_LABELS[meta.finish_reason] || escapeHtml(meta.finish_reason)}</dd>` : ''}
         </dl>
         ${meta.finish_detail ? note(escapeHtml(meta.finish_detail)) : ''}
@@ -862,6 +887,59 @@ function turnHtml(meta, messageId, pending) {
   return html;
 }
 
+/* 실행 조건 하나를 '이름 값'으로. 옛 기록에 없는 값은 '기록 없음'으로 보여 준다 */
+function conditionText(field, value) {
+  if (field === 'prompt_version') return value ? `프롬프트 ${value}` : '프롬프트 기록 없음';
+  const name = FIELD_INFO[GROUP_FIELD_INFO_KEYS[field] || field]?.label || field;
+  if (value === null || value === undefined) return `${name} ${field === 'temperature' ? '기본' : '기록 없음'}`;
+  const text = GROUP_VALUE_LABELS[field]?.[value] ?? (typeof value === 'number' ? numberFormat.format(value) : value);
+  return `${name} ${text}`;
+}
+
+const optionTexts = (options, keys) => (options
+  ? keys.map((key) => `${key} ${options[key] ?? '기본'}`)
+  : ['.env 옵션 기록 없음']);
+
+/* 비교 표. 비교 탭(대화 하나)과 실험 탭(여러 대화)이 함께 쓴다.
+   설정 칸에는 라벨과 모델, 그리고 행마다 다른 조건(varying)만 보여 주고, 같은 조건은 표 아래에 한 번만 적는다. */
+function compareTable(groups, varying) {
+  // .env 옵션은 묶음째 다르다고 나오므로, 그 안에서도 실제로 값이 다른 키만 고른다
+  const optionKeys = [...new Set(groups.flatMap((g) => Object.keys(g.options || {})))]
+    .filter((key) => new Set(groups.map((g) => JSON.stringify(g.options?.[key] ?? null))).size > 1);
+  const rows = groups.map((g) => {
+    const conditions = varying.filter((f) => f !== 'label' && f !== 'model')
+      .flatMap((f) => (f === 'options' ? optionTexts(g.options, optionKeys) : [conditionText(f, g[f])]));
+    const costParts = [`대화 ${usd(g.usd)}`];
+    if (g.summary_calls) costParts.push(`요약 ${g.summary_calls}회 ${usd(g.summary_usd)}`);
+    if (g.judge_calls) costParts.push(`검수 ${g.judge_calls}회 ${usd(g.judge_usd)}`);
+    // 좁은 패널에서 아무 데서나 줄이 바뀌지 않게 항목마다 한 줄씩 쓴다
+    const costDetail = g.has_cost && costParts.length > 1 ? `<span class="cell-sub">${costParts.join('<br>')}</span>` : '';
+    return `
+      <tr>
+        <td>${g.label ? `<b>${escapeHtml(g.label)}</b><br>` : ''}${escapeHtml(g.model ?? '모델 기록 없음')}${conditions.length
+          ? `<span class="cell-sub">${conditions.map(escapeHtml).join(' · ')}</span>` : ''}</td>
+        <td>${g.turns}</td>
+        <td>${g.turns ? fmt(g.avg_input) : '–'}</td>
+        <td>${g.input_total ? `${Math.round(g.cache_hit_ratio * 100)}%` : '–'}</td>
+        <td>${g.has_cost ? usd(g.total_usd) : '–'}${costDetail}</td>
+        <td>${ms(g.avg_ttft_ms)}</td>
+        <td>${ms(g.avg_first_visible_ms)}</td>
+      </tr>`;
+  }).join('');
+  const first = groups[0] || {};
+  const common = GROUP_FIELDS
+    .filter((f) => !varying.includes(f) && f !== 'label' && f !== 'model' && first[f] !== null && first[f] !== undefined)
+    .flatMap((f) => (f === 'options' ? optionTexts(first.options, Object.keys(first.options)) : [conditionText(f, first[f])]));
+  return `
+    <div class="table-scroll">
+      <table class="compare">
+        <thead><tr><th>설정</th><th>턴</th><th>입력</th><th>캐시</th><th>비용</th><th>첫 토큰</th><th>첫 표시</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${common.length ? note(`모든 행에 같은 조건: ${common.map(escapeHtml).join(' · ')}`) : ''}`;
+}
+
 async function renderCompareTab() {
   const box = $('#tab-compare');
   if (!state.chatId) {
@@ -875,24 +953,12 @@ async function renderCompareTab() {
       box.innerHTML = note('아직 사용량이 기록된 답변이 없어요.');
       return;
     }
-    const rows = data.groups.map((g) => `
-      <tr>
-        <td>${escapeHtml(g.model)}<br><span class="muted small-text">${STRATEGY_LABELS[g.strategy] || g.strategy}, 캐시 ${CACHE_LABELS[g.cache_mode] || g.cache_mode}</span></td>
-        <td>${g.turns}</td>
-        <td>${fmt(g.avg_input)}</td>
-        <td>${Math.round(g.cache_hit_ratio * 100)}%</td>
-        <td>${g.has_cost ? usd(g.usd) : '–'}</td>
-        <td>${ms(g.avg_ttft_ms)}</td>
-      </tr>`).join('');
     box.innerHTML = `
       <section class="panel-block">
         <h3>설정별 비교 (이 대화의 모든 가지)</h3>
-        <table class="compare">
-          <thead><tr><th>설정</th><th>턴</th><th>입력</th><th>캐시</th><th>비용</th><th>첫 토큰</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-        ${note('입력은 턴당 평균 입력 토큰, 캐시는 입력 중 캐시에서 읽은 비율, 비용은 합계, 첫 토큰은 평균이에요.')}
-        ${note('같은 대화에서 설정(창 전략, 캐시 방식, 모델)을 바꿔 가며 보내면 행이 나뉘어요. 비용은 가격표가 있는 모델만 계산해요(app/pricing.py, pricing.json).')}
+        ${compareTable(data.groups, data.varying)}
+        ${note('입력은 턴당 평균 입력 토큰, 캐시는 입력 중 캐시에서 읽은 비율, 비용은 대화에 요약과 LLM 검수 판정을 더한 합계, 첫 토큰과 첫 표시는 평균이에요.')}
+        ${note('실험 라벨, 모델, 창 전략, 입력 예산, 캐시 방식, 출력 버퍼, .env의 사고 설정, 프롬프트 파일 중 하나라도 다르면 행이 나뉘어요. 설정 칸에는 행마다 다른 조건만 보여요. 비용은 가격표가 있는 모델만 계산해요(app/pricing.py, pricing.json).')}
       </section>
       ${state.config?.settings.provider === 'mock' ? `
       <section class="panel-block">
@@ -1031,6 +1097,9 @@ function settingField(key, settings, config) {
     return `<label class="field"><span>${info.label}</span><input name="model" value="${escapeHtml(value)}" placeholder="${escapeHtml(config.default_models[provider] || '모델 이름')}">${help}</label>`;
   }
   const spec = config.spec[key];
+  if (spec.type === 'text') {
+    return `<label class="field"><span>${info.label}</span><input name="${key}" type="text" maxlength="${spec.max_len}" value="${escapeHtml(settings[key] ?? '')}" placeholder="비우면 라벨 없음">${help}</label>`;
+  }
   if (spec.type === 'choice') {
     const options = spec.choices.map((choice) =>
       `<option value="${choice}" ${choice === settings[key] ? 'selected' : ''}>${escapeHtml(info.options?.[choice] || choice)}</option>`).join('');
@@ -1080,6 +1149,7 @@ async function submitSettings(event) {
     if (key === 'provider' || key === 'models' || !form.elements[key]) continue;
     const raw = form.elements[key].value;
     if (spec.type === 'choice') body[key] = raw;
+    else if (spec.type === 'text') body[key] = raw.trim(); // 빈 문자열도 보내야 라벨을 지울 수 있다
     else if (spec.type === 'int') body[key] = parseInt(raw, 10);
     else if (spec.type === 'float') body[key] = parseFloat(raw);
     else if (spec.type === 'float_or_none') body[key] = raw === '' ? null : parseFloat(raw);

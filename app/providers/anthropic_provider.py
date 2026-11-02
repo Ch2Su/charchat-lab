@@ -80,6 +80,13 @@ class AnthropicProvider(Provider):
     def render(self, req: ChatRequest) -> dict:
         return self._options(build_anthropic_payload(req, self._max_tokens(req.max_tokens)))
 
+    def options(self) -> dict:
+        return {
+            "effort": config.ANTHROPIC_EFFORT,
+            "thinking": config.ANTHROPIC_THINKING,
+            "thinking_headroom": self._max_tokens(0),  # 사고를 끄면 더하지 않으므로 0
+        }
+
     async def stream(self, req: ChatRequest) -> AsyncIterator[StreamEvent]:
         import anthropic
 
