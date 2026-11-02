@@ -304,12 +304,20 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
         db.delete_chat(chat_id)
         return {"ok": True}
 
+    def reject_mock_during_experiment() -> None:
+        """mock을 쓰는 실험이 도는 동안 mock으로 다른 대화를 보내면 캐시와 난수 순서가 섞여 실험 결과가 흔들린다."""
+        if runner.uses_mock() and get_settings()["provider"] == "mock":
+            raise TurnError("mock을 쓰는 실험이 실행 중이에요. 캐시와 난수를 함께 써서 결과가 섞이니, "
+                            "실험이 끝나거나 취소한 뒤에 보내세요.", 409)
+
     @app.post("/api/chats/{chat_id}/messages")
     async def send_message(chat_id: int, body: SendIn):
+        reject_mock_during_experiment()
         return _stream(service.send(chat_id, body.content))
 
     @app.post("/api/chats/{chat_id}/regenerate")
     async def regenerate(chat_id: int, body: RegenerateIn):
+        reject_mock_during_experiment()
         return _stream(service.regenerate(chat_id, body.message_id))
 
     @app.post("/api/chats/{chat_id}/switch")
@@ -343,6 +351,7 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
         if not message:
             raise HTTPException(404, "메시지를 찾을 수 없어요.")
         if message["role"] == "user":
+            reject_mock_during_experiment()
             return _stream(service.edit_user(message_id, body.content))
         return service.edit_assistant(message_id, body.content)
 
@@ -366,6 +375,10 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
     @app.post("/api/experiments")
     async def start_experiment(body: dict):
         return {"id": runner.start(body)}
+
+    @app.post("/api/experiments/estimate")
+    async def estimate_experiment(body: dict):
+        return runner.estimate(body)
 
     @app.get("/api/experiments")
     async def list_experiments():

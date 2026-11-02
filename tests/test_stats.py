@@ -61,6 +61,17 @@ def test_llm_judge_cost_is_counted(client, echo_id):
     assert group["turns"] == 2 and group["judge_calls"] == 5
 
 
+def test_judge_cost_is_kept_when_no_reply_is_saved(client, echo_id):
+    # 문장 단위 버퍼에서는 보여 준 글이 없어 오류 답이 저장되지 않는다. 입력 판정 비용은 그래도 집계에 남는다
+    settings(client, moderation_backend="llm", output_buffer="sentence")
+    chat_id = new_chat(client, echo_id)["chat"]["id"]
+    events = send(client, chat_id, "/error 끊겨 봐")
+    assert event(events, "error") and not event(events, "done")
+    group = stats(client, chat_id)["groups"][0]
+    assert group["turns"] == 0 and group["judge_calls"] == 1 and group["judge_usd"] > 0
+    assert group["total_usd"] == pytest.approx(group["judge_usd"])
+
+
 def test_rules_only_turn_has_no_aux(client, echo_id):
     chat_id = new_chat(client, echo_id)["chat"]["id"]
     done = event(send(client, chat_id, "관측실 보여 줘"), "done")[0]["message"]

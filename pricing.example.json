@@ -1,5 +1,5 @@
 {
-  "_comment": "pricing.json으로 복사해서 쓰세요. 키는 '제공사:모델'(모든 모델은 '제공사:*'), 가격은 100만 토큰당 USD입니다. cache_read_mult/cache_write_mult는 기본 입력 가격 대비 배율이에요. 아래 Gemini 값은 자리표시자이니 공식 가격표에서 확인한 값으로 바꾸세요. 로컬 모델은 0으로 두면 돼요.",
-  "gemini:gemini-3.8-flash": {"input": 0.0, "output": 0.0, "cache_read_mult": 0.25, "cache_write_mult": 1.0},
+  "_comment": "pricing.json으로 복사해서 쓰세요. 키는 '제공사:모델'(모든 모델은 '제공사:*'), 가격은 100만 토큰당 USD입니다. cache_read_mult/cache_write_mult는 기본 입력 가격 대비 배율이에요. input/output이 null인 항목은 가격표에 없는 것으로 보고 비용을 계산하지 않아요. Gemini의 null은 공식 가격표에서 확인한 숫자로 바꾸세요. 로컬 모델은 0으로 두면 돼요.",
+  "gemini:gemini-3.8-flash": {"input": null, "output": null, "cache_read_mult": 0.25, "cache_write_mult": 1.0},
   "openai_compat:*": {"input": 0.0, "output": 0.0, "cache_read_mult": 1.0, "cache_write_mult": 1.0}
 }

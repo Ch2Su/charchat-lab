@@ -19,7 +19,7 @@ import json
 import time
 from contextlib import aclosing
 
-from . import config, memory
+from . import config, memory, pricing
 from .chat_service import GROUP_FIELDS, ChatService, TurnError
 from .config import Settings
 from .db import DB
@@ -30,6 +30,8 @@ MAX_INPUT_CHARS = 2000
 MAX_VARIANTS = 6
 MAX_LABEL_CHARS = 40
 MAX_COOLDOWN_SECONDS = 600
+# 실제 제공사의 캐시는 이만큼 지나야 만료된다고 보고 경고한다(Anthropic 기본 5분)
+CACHE_TTL_SECONDS = 300
 
 CSV_FIELDS = (*GROUP_FIELDS, "turns", "avg_input", "cache_hit_ratio", "usd", "judge_calls", "judge_usd",
               "summary_calls", "summary_usd", "total_usd", "avg_ttft_ms", "avg_first_visible_ms",
@@ -65,10 +67,16 @@ class ExperimentRunner:
         self.db = db
         self.service = service
         self._tasks: dict[int, asyncio.Task] = {}
+        self._uses_mock: dict[int, bool] = {}
         self._closing = False
 
     def running_id(self) -> int | None:
         return next((eid for eid, task in self._tasks.items() if not task.done()), None)
+
+    def uses_mock(self) -> bool:
+        """지금 도는 실험에 mock 변형이 있는가. mock의 캐시와 난수는 모든 대화가 함께 쓴다."""
+        running = self.running_id()
+        return running is not None and self._uses_mock.get(running, False)
 
     # ── 검증 ─────────────────────────────────────
     @staticmethod
@@ -155,6 +163,42 @@ class ExperimentRunner:
         }
         return clean, built
 
+    def estimate(self, spec) -> dict:
+        """시작하기 전에 변형별 호출 수와 비용 상한을 어림한다. 검증은 start와 같아서 잘못된 요청은 TurnError.
+
+        비용은 매 턴 입력이 입력 예산을 꽉 채우고 출력도 최대치까지 나온다고 본 상한이다(캐시 할인, 요약 호출,
+        사고 여유분은 뺀다). 가격표에 없는 모델은 max_usd가 None이다.
+        """
+        clean, variants = self.validate(spec)
+        turns = len(clean["inputs"])
+        rows = []
+        for label, settings in variants:
+            provider, model = settings["provider"], settings.model
+            price = pricing.price_for(provider, model)
+            max_input, max_output = turns * settings["input_token_budget"], turns * settings["max_output_tokens"]
+            judged = settings["moderation_mode"] != "off" and settings["moderation_backend"] == "llm"
+            rows.append({
+                "label": label, "provider": provider, "model": model,
+                "chat_calls": turns, "judge_calls": 2 * turns if judged else 0,
+                "summary_possible": settings["window_strategy"] == "anchored",
+                "max_input_tokens": max_input, "max_output_tokens": max_output,
+                "max_usd": round((max_input * price["input"] + max_output * price["output"]) / 1_000_000, 6)
+                if price else None,
+            })
+        paid = [row for row in rows if row["provider"] != "mock"]
+        cooldown = clean["cooldown_seconds"]
+        return {
+            "turns": turns,
+            "variants": rows,
+            "paid_calls": sum(row["chat_calls"] + row["judge_calls"] for row in paid),
+            "paid_max_usd": round(sum(row["max_usd"] or 0 for row in paid), 6),
+            "unpriced": [row["label"] for row in paid if row["max_usd"] is None],
+            # 실제 제공사 변형이 둘 이상인데 캐시가 만료될 만큼 기다리지 않으면 앞 변형의 캐시가 뒤 변형에 섞인다
+            "cache_overlap": len(paid) > 1 and cooldown < CACHE_TTL_SECONDS,
+            "cooldown_seconds": cooldown,
+            "cache_ttl_seconds": CACHE_TTL_SECONDS,
+        }
+
     # ── 시작과 멈춤 ───────────────────────────────
     def start(self, spec) -> int:
         if self.running_id() is not None:
@@ -168,7 +212,8 @@ class ExperimentRunner:
         )
         task = asyncio.get_running_loop().create_task(self._run(experiment_id, clean, variants))
         self._tasks[experiment_id] = task
-        task.add_done_callback(lambda _task: self._tasks.pop(experiment_id, None))
+        self._uses_mock[experiment_id] = any(settings["provider"] == "mock" for _, settings in variants)
+        task.add_done_callback(lambda _task: (self._tasks.pop(experiment_id, None), self._uses_mock.pop(experiment_id, None)))
         return experiment_id
 
     def cancel(self, experiment_id: int) -> bool:

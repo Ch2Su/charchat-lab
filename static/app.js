@@ -835,7 +835,8 @@ function turnHtml(meta, messageId, pending) {
   }
 
   const aux = meta.aux || [];
-  if (meta.cost || aux.length) {
+  const unpriced = Boolean(usage) && !meta.cost && run.provider !== 'mock'; // 사용량은 있는데 가격표에 없는 모델
+  if (meta.cost || aux.length || unpriced) {
     const saved = meta.cost?.no_cache_usd ? 1 - meta.cost.usd / meta.cost.no_cache_usd : 0;
     html += `
       <section class="panel-block">
@@ -849,6 +850,7 @@ function turnHtml(meta, messageId, pending) {
         </dl>
         ${saved < 0 ? note('처음 캐시에 쓰는 턴은 쓰기 비용(1.25배) 때문에 오히려 비싸요. 다음 턴부터 읽기(0.1배)로 돌려받아요.') : ''}
         ${aux.length ? note('검수 판정은 대화와 따로 부르는 LLM 호출이에요. 이번 턴 비용에는 들어가지 않고, 비교 탭의 비용 합계에는 들어가요.') : ''}
+        ${unpriced ? note(`${escapeHtml(run.provider || '')} · ${escapeHtml(run.model || '')}은 가격표에 없어서 대화 비용을 계산하지 않았어요. 로컬 모델은 0으로 두면 되고, 다른 모델은 pricing.json에 가격을 추가하세요(app/pricing.py).`) : ''}
         ${run.provider === 'mock' ? note('mock은 Claude Haiku 5.5 가격으로 흉내 낸 값이에요.') : ''}
       </section>`;
   }
@@ -990,7 +992,7 @@ function compareTable(groups, varying) {
         <td>${g.turns}</td>
         <td>${g.turns ? fmt(g.avg_input) : '–'}</td>
         <td>${g.input_total ? `${Math.round(g.cache_hit_ratio * 100)}%` : '–'}</td>
-        <td>${g.has_cost ? usd(g.total_usd) : '–'}${costDetail}</td>
+        <td>${g.has_cost ? usd(g.total_usd) : (g.turns ? '가격표 없음' : '–')}${costDetail}</td>
         <td>${ms(g.avg_ttft_ms)}</td>
         <td>${ms(g.avg_first_visible_ms)}</td>
         <td>${measured ? `${ratio(g.avg_foreign_ratio)}<span class="cell-sub">로마자 ${ratio(g.avg_latin_ratio)}</span>` : '–'}</td>
@@ -1373,6 +1375,23 @@ function collectVariants() {
   return ok ? variants : null;
 }
 
+// 실제 제공사로 보내는 실험을 시작하기 전에 묻는 글. 비용은 입력 예산과 최대 출력을 다 쓴다고 본 상한이다
+function estimateText(estimate) {
+  const lines = ['실제 API를 부르는 실험이에요.', ''];
+  for (const v of estimate.variants.filter((row) => row.provider !== 'mock')) {
+    const calls = `대화 ${v.chat_calls}회${v.judge_calls ? ` + 검수 판정 ${v.judge_calls}회` : ''}${v.summary_possible ? ' + 요약(필요할 때)' : ''}`;
+    lines.push(`· ${v.label} (${v.provider} · ${v.model}): ${calls}, 비용 상한 ${v.max_usd === null ? '가격표 없음' : usd(v.max_usd)}`);
+  }
+  const unpriced = estimate.unpriced.length ? ` (가격표 없는 변형은 빠져 있어요: ${estimate.unpriced.join(', ')})` : '';
+  lines.push('', `호출 ${estimate.paid_calls}회 이상, 비용 상한 합계 ${usd(estimate.paid_max_usd)}${unpriced}`);
+  lines.push('상한은 매 턴 입력 예산과 최대 출력을 모두 쓴다고 본 값이에요. 캐시 할인과 요약 비용은 빠져 있어요.');
+  if (estimate.cache_overlap) {
+    lines.push('', `⚠ 변형 사이 대기가 ${estimate.cooldown_seconds}초예요. 캐시 수명(${estimate.cache_ttl_seconds}초)보다 짧아서 앞 변형의 캐시가 뒤 변형에 섞이고, 캐시 적중률과 첫 토큰 시간 비교가 틀어질 수 있어요.`);
+  }
+  lines.push('', '계속할까요?');
+  return lines.join('\n');
+}
+
 async function submitExperiment(event) {
   event.preventDefault();
   const form = event.target;
@@ -1386,10 +1405,6 @@ async function submitExperiment(event) {
     errorBox.hidden = false;
     return;
   }
-  // mock이 아닌 제공사로 보내는 변형이 있으면 실제 호출 횟수를 한 번 묻는다
-  const current = state.config?.settings.provider;
-  const paid = variants.filter((v) => (v.settings.provider || current) !== 'mock').length;
-  if (paid && !window.confirm(`실제 API를 ${inputs.length * paid}번 호출해요. 계속할까요?`)) return;
   const seed = form.elements.seed.value.trim();
   const body = {
     name: form.elements.name.value.trim(),
@@ -1403,6 +1418,12 @@ async function submitExperiment(event) {
     cooldown_seconds: Number(form.elements.cooldown_seconds.value || 0),
   };
   try {
+    // mock이 아닌 제공사로 보내는 변형이 있으면 호출 수와 비용 상한을 보여 주고 한 번 묻는다
+    const current = state.config?.settings.provider;
+    if (variants.some((v) => (v.settings.provider || current) !== 'mock')) {
+      const estimate = await api('/api/experiments/estimate', { json: body });
+      if (!window.confirm(estimateText(estimate))) return;
+    }
     const { id } = await api('/api/experiments', { json: body });
     $('#dlg-experiment').close();
     state.experimentId = id;

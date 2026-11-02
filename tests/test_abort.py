@@ -75,3 +75,26 @@ def test_http_disconnect_saves_partial(tmp_path, monkeypatch):
         server.should_exit = True
         thread.join(timeout=5)
         app.state.db.close()
+
+
+def test_stopped_before_any_text_keeps_judge_cost(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "MOCK_DELAY_SCALE", 0)
+    db = DB(tmp_path / "abort.sqlite3")
+    seed_characters(db)
+    service = ChatService(db, lambda: config.build_settings({"output_buffer": "sentence", "moderation_backend": "llm"}))
+    chat_id = db.create_chat(db.list_characters()[0]["id"], "민준")
+
+    async def stop_while_thinking():
+        stream = service.send(chat_id, "/think 생각해 봐")
+        async for chunk in stream:
+            if chunk.startswith("event: thinking"):
+                await stream.aclose()  # 보인 글이 하나도 없을 때 멈춤
+                break
+
+    asyncio.run(stop_while_thinking())
+    leaf = db.get_message(db.get_chat(chat_id)["active_leaf_id"])
+    assert leaf["role"] == "user"  # 답이 저장되지 않았다
+    group = service.stats_for_chats([chat_id])["groups"][0]
+    assert group["turns"] == 0 and group["judge_calls"] == 1 and group["judge_usd"] > 0
+    db.close()
+

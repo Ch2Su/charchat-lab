@@ -25,6 +25,10 @@ BUILTIN = {
 }
 
 
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _overrides() -> dict:
     path = config.PRICING_OVERRIDE_PATH
     if not path.exists():
@@ -33,7 +37,9 @@ def _overrides() -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
         return {}
-    return {k: v for k, v in data.items() if isinstance(v, dict) and not k.startswith("_")}
+    # 가격이 숫자가 아닌 항목(예시 파일의 null 자리표시자)은 없는 셈 친다. 0으로 읽혀 무료처럼 보이면 안 된다
+    return {k: v for k, v in data.items()
+            if isinstance(v, dict) and not k.startswith("_") and _is_number(v.get("input")) and _is_number(v.get("output"))}
 
 
 def price_for(provider: str, model: str) -> dict | None:

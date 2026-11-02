@@ -361,6 +361,8 @@ class ChatService:
                 message_id = db.add_message(chat["id"], user_msg["id"], "assistant", shown, meta=meta)
                 db.set_active_leaf(chat["id"], message_id)
                 db.add_prompt_log(chat["id"], message_id, "chat", payload)
+            else:  # 보인 글이 없어 답이 저장되지 않아도 이미 쓴 입력 판정 비용은 남긴다
+                db.add_prompt_log(chat["id"], None, "chat", {"request": payload, "aborted": True, "run": run, "aux": aux})
             raise
 
         raw_text = "".join(raw_parts)
@@ -380,7 +382,8 @@ class ChatService:
                     event_ids.append(self._log_mod("output", output_check, "logged", raw_text, chat=chat))
 
         if error and not shown_text:
-            db.add_prompt_log(chat["id"], None, "chat", {"request": payload, "error": error})
+            # 답변이 저장되지 않는 턴이라, 입력 판정 비용(aux)은 프롬프트 기록에 남겨 비교 집계가 읽게 한다
+            db.add_prompt_log(chat["id"], None, "chat", {"request": payload, "error": error, "run": run, "aux": aux})
             yield sse("error", {"message": error, "user_message_id": user_msg["id"]})
             return
 
@@ -508,6 +511,13 @@ class ChatService:
                 }
             return groups[key]
 
+        def add_judges(group: dict, judges: list[dict]) -> None:
+            for entry in judges:
+                group["judge_calls"] += 1
+                if entry.get("cost"):
+                    group["has_cost"] = True
+                    group["judge_usd"] += entry["cost"]["usd"]
+
         ids = [int(i) for i in chat_ids]
         marks = ",".join("?" for _ in ids)
         rows = self.db.q(
@@ -522,11 +532,7 @@ class ChatService:
             if not run or not (is_turn or judges):
                 continue
             group = group_for(run)
-            for entry in judges:
-                group["judge_calls"] += 1
-                if entry.get("cost"):
-                    group["has_cost"] = True
-                    group["judge_usd"] += entry["cost"]["usd"]
+            add_judges(group, judges)
             if not is_turn:
                 continue
             group["turns"] += 1
@@ -549,6 +555,18 @@ class ChatService:
                 group["_repeat_prev"] += measured.get("repeat_prev") or 0
                 group["speech_shift_turns"] += bool(measured.get("speech_shift"))
                 group["flagged_turns"] += bool(measured.get("flags"))
+
+        # 답이 저장되지 않은 턴(첫 글자 전 오류, 보인 글 없이 멈춤)의 판정 비용은 프롬프트 기록에 있다
+        unsaved = self.db.q(
+            "SELECT json_extract(payload, '$.run') AS run, json_extract(payload, '$.aux') AS aux FROM prompt_logs "
+            f"WHERE chat_id IN ({marks}) AND kind='chat' AND message_id IS NULL "
+            "AND json_extract(payload, '$.aux') IS NOT NULL", ids) if ids else []
+        for row in unsaved:
+            run, judges = json.loads(row["run"] or "null"), json.loads(row["aux"] or "[]")
+            judges = [e for e in judges if str(e.get("purpose", "")).startswith("judge")]
+            if not run or not judges:
+                continue
+            add_judges(group_for(run), judges)
 
         summaries = self.db.q(f"SELECT meta FROM summaries WHERE chat_id IN ({marks}) ORDER BY id", ids) if ids else []
         for row in summaries:

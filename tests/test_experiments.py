@@ -5,11 +5,12 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import config, memory
+from app import config, memory, pricing
 from app.chat_service import ChatService
 from app.db import DB
 from app.main import create_app
 from app.providers import close_all, get_provider, reset_mock
+from tests.test_api import new_chat
 
 INPUTS = ["안녕하세요", "책 구경해도 돼요?", "이 서점은 언제 생겼어요?", "할머니 얘기도 듣고 싶어요",
           "저 고양이 이름이 뭐예요?", "2층에는 뭐가 있어요?"]
@@ -113,7 +114,8 @@ def test_invalid_requests_are_rejected(client, haram_id, change, message, monkey
     assert client.get("/api/experiments").json() == []
 
 
-def test_second_start_conflicts_and_cancel_stops(client, echo_id, monkeypatch):
+def slow_down_send(monkeypatch):
+    """실험의 턴마다 0.05초씩 기다리게 해서 실행 중인 동안 다른 요청을 끼워 넣을 수 있게 한다. 원래 send를 돌려준다."""
     original = ChatService.send
 
     def slow_send(self, chat_id, content, settings=None):
@@ -126,6 +128,11 @@ def test_second_start_conflicts_and_cancel_stops(client, echo_id, monkeypatch):
         return slowed()
 
     monkeypatch.setattr(ChatService, "send", slow_send)
+    return original
+
+
+def test_second_start_conflicts_and_cancel_stops(client, echo_id, monkeypatch):
+    original = slow_down_send(monkeypatch)
     experiment_id = start(client, body(echo_id, inputs=[f"질문 {i}" for i in range(100)]))
     assert client.post("/api/experiments", json=body(echo_id)).status_code == 409
     assert client.delete(f"/api/experiments/{experiment_id}").status_code == 409  # 실행 중에는 못 지운다
@@ -137,6 +144,47 @@ def test_second_start_conflicts_and_cancel_stops(client, echo_id, monkeypatch):
     assert client.post(f"/api/experiments/{experiment_id}/cancel").status_code == 409
     monkeypatch.setattr(ChatService, "send", original)
     assert wait_finished(client, start(client, body(echo_id, inputs=INPUTS[:1])))["status"] == "done"
+
+
+def test_mock_chats_wait_while_a_mock_experiment_runs(client, echo_id, monkeypatch):
+    slow_down_send(monkeypatch)
+    chat_id = new_chat(client, echo_id)["chat"]["id"]
+    experiment_id = start(client, body(echo_id, inputs=[f"질문 {i}" for i in range(100)]))
+    # mock의 캐시와 난수는 모든 대화가 함께 쓰므로, 실험이 도는 동안은 다른 대화를 보내지 못한다
+    response = client.post(f"/api/chats/{chat_id}/messages", json={"content": "끼어들기"})
+    assert response.status_code == 409 and "실험이 실행 중" in response.json()["detail"]
+    assert client.post(f"/api/experiments/{experiment_id}/cancel").json() == {"ok": True}
+    wait_finished(client, experiment_id)
+    monkeypatch.undo()
+    assert client.post(f"/api/chats/{chat_id}/messages", json={"content": "이제 보내요"}).status_code == 200
+
+
+def test_estimate_counts_paid_calls_and_warns_about_shared_cache(client, haram_id, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "PRICING_OVERRIDE_PATH", tmp_path / "none.json")  # 개발자의 pricing.json에 기대지 않는다
+    monkeypatch.setattr(config, "OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.setitem(pricing.BUILTIN, "openai_compat:fake-model", {"input": 1.0, "output": 2.0})
+    real = {"provider": "openai_compat", "models": {"openai_compat": "fake-model"}, "input_token_budget": 1000,
+            "max_output_tokens": 500, "moderation_backend": "llm"}
+    payload = body(haram_id, variants=[
+        {"label": "모의", "settings": {}},
+        {"label": "실제A", "settings": real},
+        {"label": "실제B", "settings": {**real, "moderation_backend": "rules"}},
+    ])
+    response = client.post("/api/experiments/estimate", json=payload)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    rows = {row["label"]: row for row in data["variants"]}
+    assert rows["실제A"]["chat_calls"] == 6 and rows["실제A"]["judge_calls"] == 12 and rows["실제B"]["judge_calls"] == 0
+    assert rows["실제A"]["max_usd"] == pytest.approx((6 * 1000 * 1.0 + 6 * 500 * 2.0) / 1_000_000)
+    assert data["paid_calls"] == 6 + 12 + 6  # mock 변형은 세지 않는다
+    assert data["paid_max_usd"] == pytest.approx(2 * rows["실제A"]["max_usd"]) and data["unpriced"] == []
+    assert data["cache_overlap"] is True  # 실제 제공사 변형 둘이 기다림 없이 이어지면 캐시가 섞인다
+
+    assert client.post("/api/experiments/estimate", json={**payload, "cooldown_seconds": 300}).json()["cache_overlap"] is False
+    unpriced = {**payload, "variants": [{"label": "값없음", "settings": {**real, "models": {"openai_compat": "no-price"}}}]}
+    assert client.post("/api/experiments/estimate", json=unpriced).json()["unpriced"] == ["값없음"]
+    assert client.post("/api/experiments/estimate", json={**payload, "inputs": []}).status_code == 400  # start와 같은 검증
+    assert client.get("/api/experiments").json() == []  # 어림만 하고 실험을 만들지 않는다
 
 
 def test_blocked_input_is_counted_and_skipped(client, echo_id):
