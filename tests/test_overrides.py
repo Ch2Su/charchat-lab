@@ -19,9 +19,10 @@ def test_provider_options_are_checked():
     # None과 빈 값은 '보내지 않음'(.env에 값이 있어도 모델 기본값을 쓴다)
     assert coerce({"openai_compat": {"reasoning_effort": None, "top_p": ""}}) == \
         {"openai_compat": {"reasoning_effort": None, "top_p": None}}
+    assert coerce({"openai_compat": {"presence_penalty": -1}}) == {"openai_compat": {"presence_penalty": -1.0}}
     for bad, message in [({"mock": {}}, "제공사"), ({"openai_compat": {"temperature": 1}}, "알 수 없는 옵션"),
-                         ({"openai_compat": {"top_p": 1.5}}, "0~1"), ({"anthropic": {"effort": "아주 높게"}}, "영문 소문자"),
-                         (["low"], "형태")]:
+                         ({"openai_compat": {"top_p": 1.5}}, "0~1"), ({"openai_compat": {"presence_penalty": 3}}, "-2~2"),
+                         ({"anthropic": {"effort": "아주 높게"}}, "영문 소문자"), (["low"], "형태")]:
         with pytest.raises(config.SettingsError, match=message):
             coerce(bad)
 

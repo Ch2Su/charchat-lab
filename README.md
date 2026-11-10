@@ -81,7 +81,7 @@ mock 제공사에서는 입력에 테스트 명령을 넣을 수 있어요: `/lo
 - **입력 대본**: 한 줄에 하나씩 보낼 말을 적어요(최대 100개, 빈 줄은 건너뜀).
 - **변형**: 라벨과, 지금 설정에서 바꿀 값만 적은 설정 JSON이에요(최대 6개). 예: `{"window_strategy": "full"}`, `{"input_token_budget": 3000}`, `{"provider": "openai_compat", "models": {"openai_compat": "qwen3.5:4b"}}`. 변형마다 새 대화를 만들어 대본을 처음부터 보내고, 라벨이 실험 라벨이 되어 결과 표의 행을 나눠요. 저장된 설정은 바뀌지 않아요.
 - **제공사 옵션과 프롬프트도 변형마다**: `.env`로만 바꾸던 사고·샘플링 옵션과 `prompts/*.txt`의 내용도 변형의 설정 JSON으로 덮어쓸 수 있어요. 서버를 다시 켜지 않아도 실험 한 번에 비교돼요.
-  - `{"provider_options": {"openai_compat": {"reasoning_effort": "none", "top_p": 0.95}}}`: 바꿀 수 있는 옵션은 Claude의 `effort`·`thinking`, Gemini의 `thinking_level`, OpenAI 호환의 `reasoning_effort`·`top_p`예요. 값을 `null`로 두면 `.env`에 값이 있어도 보내지 않아요(모델 기본값).
+  - `{"provider_options": {"openai_compat": {"reasoning_effort": "none", "top_p": 0.95}}}`: 바꿀 수 있는 옵션은 Claude의 `effort`·`thinking`, Gemini의 `thinking_level`, OpenAI 호환의 `reasoning_effort`·`top_p`·`presence_penalty`예요. 값을 `null`로 두면 `.env`에 값이 있어도 보내지 않아요. Ollama의 `/v1`은 `top_p`·`presence_penalty`를 보내지 않으면 Modelfile의 값(`ollama show 모델 --parameters`) 대신 1.0·0을 써요.
   - `{"prompt_overrides": {"final_user": "<system-memo>\n{lore}{instructions}\n</system-memo>\n\n{input}"}}`: 파일 이름(확장자는 빼도 돼요)과 바꿀 내용이에요. `final_user`에는 `{input}`, `summary_user`에는 `{dialogue}`가 있어야 해요. 요약·검수 프롬프트도 같은 방식으로 바꿀 수 있어요.
   - 덮어쓴 값은 실행 조건(제공사 옵션, 프롬프트 지문)에 그대로 남아서 비교 표의 행이 저절로 나뉘어요. 같은 키를 `PUT /api/settings`로 저장해 두면 평소 대화에도 쓰여요(설정 화면에는 나오지 않아요).
 - **mock 캐시 비우고 난수 다시 심기**: 변형마다 mock을 같은 상태(같은 시드)에서 시작해요. 설정이 같으면 답변과 캐시 적중이 똑같이 나와서, 설정 차이만 비교할 수 있어요.

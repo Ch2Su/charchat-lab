@@ -166,7 +166,8 @@ class OpenAICompatProvider(Provider):
     @staticmethod
     def _values(overrides: dict | None) -> dict:
         """.env 값에 설정의 덮어쓰기를 얹는다. None은 보내지 않는다는 뜻이다."""
-        values = {"reasoning_effort": config.OPENAI_COMPAT_REASONING_EFFORT, "top_p": config.OPENAI_COMPAT_TOP_P}
+        values = {"reasoning_effort": config.OPENAI_COMPAT_REASONING_EFFORT, "top_p": config.OPENAI_COMPAT_TOP_P,
+                  "presence_penalty": None}
         values.update(overrides or {})
         return values
 
@@ -176,6 +177,8 @@ class OpenAICompatProvider(Provider):
             payload["temperature"] = temperature
         if values["top_p"] is not None:
             payload["top_p"] = values["top_p"]
+        if values["presence_penalty"] is not None:
+            payload["presence_penalty"] = values["presence_penalty"]
         if values["reasoning_effort"]:
             payload["reasoning_effort"] = values["reasoning_effort"]
         return payload

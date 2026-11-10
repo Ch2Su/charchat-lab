@@ -154,12 +154,14 @@ SETTINGS_SPEC: dict[str, dict] = {
 }
 
 # 변형마다 바꿔 볼 수 있는 제공사 옵션과 값의 종류. 키가 없으면 .env 값을 쓰고, 값이 None이면 .env에 값이
-# 있어도 보내지 않는다(모델 기본값). word는 영문 소문자·밑줄로 된 값(API가 받는지는 API가 판단), unit은 0~1 숫자
+# 있어도 보내지 않는다(모델 기본값). word는 영문 소문자·밑줄로 된 값(API가 받는지는 API가 판단), unit은 0~1 숫자,
+# penalty는 -2~2 숫자. presence_penalty는 .env 값이 없다(Ollama의 /v1은 보내지 않으면 Modelfile 값 대신 0을 쓴다)
 PROVIDER_OPTION_SPEC: dict[str, dict[str, str]] = {
     "anthropic": {"effort": "word", "thinking": "word"},
     "gemini": {"thinking_level": "word"},
-    "openai_compat": {"reasoning_effort": "word", "top_p": "unit"},
+    "openai_compat": {"reasoning_effort": "word", "top_p": "unit", "presence_penalty": "penalty"},
 }
+_OPTION_RANGES = {"unit": (0.0, 1.0), "penalty": (-2.0, 2.0)}
 _OPTION_WORD = re.compile(r"[a-z_]{1,24}")
 
 # 덮어쓴 프롬프트에 꼭 있어야 하는 자리표시자. 빠지면 사용자의 입력이나 요약할 대화가 요청에서 사라진다
@@ -187,14 +189,16 @@ def _coerce_option(path: str, kind: str, value):
         if not _OPTION_WORD.fullmatch(text):
             raise SettingsError(f"{path}: 영문 소문자와 밑줄로 된 값이어야 합니다(보내지 않으려면 null)")
         return text
+    low, high = _OPTION_RANGES[kind]
+    message = f"{path}: {low:g}~{high:g} 사이 숫자여야 합니다(보내지 않으려면 null)"
     if isinstance(value, bool):
-        raise SettingsError(f"{path}: 0~1 사이 숫자여야 합니다(보내지 않으려면 null)")
+        raise SettingsError(message)
     try:
         number = float(value)
     except (TypeError, ValueError):
-        raise SettingsError(f"{path}: 0~1 사이 숫자여야 합니다(보내지 않으려면 null)") from None
-    if not 0 <= number <= 1:
-        raise SettingsError(f"{path}: 0~1 사이 숫자여야 합니다(보내지 않으려면 null)")
+        raise SettingsError(message) from None
+    if not low <= number <= high:
+        raise SettingsError(message)
     return number
 
 

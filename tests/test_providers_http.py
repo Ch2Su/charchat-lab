@@ -320,11 +320,14 @@ def test_openai_compat_option_overrides(fake_server, monkeypatch):
     monkeypatch.setattr(config, "OPENAI_COMPAT_REASONING_EFFORT", "none")
     monkeypatch.setattr(config, "OPENAI_COMPAT_TOP_P", 0.95)
     provider = OpenAICompatProvider()
-    overrides = {"reasoning_effort": "low", "top_p": None}
+    overrides = {"reasoning_effort": "low", "top_p": None, "presence_penalty": 1.5}
     body = provider.render(request(model="local-model", options=overrides))
-    assert body["reasoning_effort"] == "low" and "top_p" not in body
-    assert provider.options(overrides) == {"reasoning_effort": "low", "top_p": None, "max_tokens_param": "max_tokens"}
-    assert provider.options() == {"reasoning_effort": "none", "top_p": 0.95, "max_tokens_param": "max_tokens"}
+    assert body["reasoning_effort"] == "low" and "top_p" not in body and body["presence_penalty"] == 1.5
+    assert provider.options(overrides) == {"reasoning_effort": "low", "top_p": None, "presence_penalty": 1.5,
+                                           "max_tokens_param": "max_tokens"}
+    assert provider.options() == {"reasoning_effort": "none", "top_p": 0.95, "presence_penalty": None,
+                                  "max_tokens_param": "max_tokens"}
+    assert "presence_penalty" not in provider.render(request(model="local-model"))  # .env 값이 없어 보내지 않는다
     asyncio.run(provider.complete("sys", "user", "local-model", 100, options={"reasoning_effort": None}))
     sent = RECORDED[-1]["body"]  # 요약·검수 호출에도 같은 덮어쓰기가 들어간다
     assert "reasoning_effort" not in sent and sent["top_p"] == 0.95
