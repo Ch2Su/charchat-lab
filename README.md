@@ -54,10 +54,10 @@ cp .env.example .env
 - **Claude 캐시 최소 길이는 512토큰**(현행 모델)이에요. 그보다 짧은 앞부분은 `cache_control`을 붙여도 오류 없이 캐시되지 않아요.
 - **Gemini**는 조정 가능한 안전 필터가 기본으로 꺼져 있어서, 이 앱은 `GEMINI_SAFETY_THRESHOLD=BLOCK_MEDIUM_AND_ABOVE`로 네 범주를 켜서 보내요. 사고 토큰은 `max_output_tokens`에 포함되므로 여기도 여유분을 더해요. 캐시는 자동(암묵적)으로만 동작하고, 3.8 Flash 기준 앞부분이 4,096토큰 이상 같아야 적중해요.
 - Gemini API 약관상 18세 미만이 이용할 가능성이 높은 서비스에는 쓸 수 없어요. 혼자 쓰는 로컬 실험은 괜찮지만, 공개한다면 약관부터 다시 확인하세요.
-- **추론형 로컬 모델**(Qwen 3.5 등)은 사고가 기본으로 켜져 있어요. `OPENAI_COMPAT_REASONING_EFFORT=none`으로 끌 수 있어요(Ollama, vLLM, OpenAI가 받아요). 작은 모델일수록 끄는 편이 나았어요(실험 8).
-- **Ollama의 `/v1`** 은 temperature·top_p를 안 보내면 모델 기본값 대신 1.0을 써요. `ollama show 모델이름 --parameters`로 기본값을 보고 `OPENAI_COMPAT_TOP_P`로 맞춰 보내세요.
+- **추론형 로컬 모델**(Qwen 3.5 등)은 사고가 기본으로 켜져 있어요. `OPENAI_COMPAT_REASONING_EFFORT=none`으로 끌 수 있어요(Ollama, vLLM, OpenAI가 받아요). 작은 모델일수록 끄는 편이 나았어요(실험 8). Ollama 0.40.16은 qwen3.5에 `low`·`medium`·`high`를 구분하지 않고 모두 '사고 켬'으로 다뤄요. `low`로도 짧은 질문 하나에 사고 2만 자를 썼어요.
+- **Ollama의 `/v1`** 은 temperature·top_p를 안 보내면 모델 기본값 대신 1.0을 써요. `ollama show 모델이름 --parameters`로 기본값을 보고 `OPENAI_COMPAT_TOP_P`로 맞춰 보내세요. 다만 qwen3.5에서 `top_p`·`presence_penalty`를 Modelfile 값으로 맞춰 보내 봤을 때 한자 섞임은 줄지 않았어요(실험 8).
 - 사고는 서버가 따로 보내면(Ollama의 `reasoning`, vLLM·LM Studio의 `reasoning_content`) 그 필드로 받고, 본문에 `<think>…</think>`로 섞여 오면 걸러서 숨겨요. 여는 태그 없이 `</think>`만 오면 그 앞을 사고로 보고 화면에서 지워요.
-- Ollama의 컨텍스트 길이(`ollama ps`의 CONTEXT 열)가 입력 예산 + 최대 출력보다 작으면 프롬프트 앞부분이 오류 없이 잘려요. 반대로 너무 크면 VRAM을 많이 차지하니 `OLLAMA_CONTEXT_LENGTH`로 맞추세요.
+- Ollama의 컨텍스트 길이(`ollama ps`의 CONTEXT 열)가 입력 예산 + 최대 출력보다 작으면 프롬프트 앞부분이 오류 없이 잘려요. 반대로 너무 크면 VRAM을 많이 차지하니 `OLLAMA_CONTEXT_LENGTH`로 맞추세요. 기본값은 모델 최대치(qwen3.5는 262,144)라서, 8GB GPU에서 qwen3.5:4b는 14.3GB 중 5.4GB만 VRAM에 올라가고 나머지는 시스템 메모리로 밀려나요. 8,192로 줄이면 3.4GB로 모두 올라가서 프롬프트 처리가 약 2.4배, 생성이 약 1.9배 빨라졌어요. 2b는 VRAM만 5.8GB에서 2.5GB로 줄고 속도는 같았어요.
 
 ## 화면
 
@@ -199,6 +199,8 @@ anchored와 sliding을 번갈아 써 보며 **첫 토큰** 시간이 어떻게 �
 비교 탭(또는 대본 재생 실험)의 외국 문자·말투 변화·반복 칸으로 모델과 사고 설정을 비교해 보세요. 같은 대본을 모델이나 사고 설정만 바꾼 변형으로 돌리면, 위 표의 "한자·영어가 섞임", "말투가 흔들림", "따라 해서 무너짐"이 행마다 숫자로 나와요.
 
 실제로 같은 12턴 대본을 qwen3.5 2b·4b, exaone3.5 7.8b, kanana 3.5b(모두 사고 끔)에 돌려 보면 이런 차이가 숫자로 나와요(2026-11-03, 실험 한 번에 약 9분 30초). 2b는 12턴 중 11턴에서 마지막 입력에 붙은 `<system-memo>`를 대사에 따라 썼고(프롬프트 샘), qwen 두 모델은 한자가 한두 글자씩 끼는 턴이 4~5턴인데 exaone과 kanana는 한 번도 없었어요. kanana는 한 문장 틀을 되풀이해서 직전 답 겹침이 평균 22%(나머지 5~12%)였고 말투도 존댓말과 반말을 오갔어요. 같은 대본의 첫 3턴을 4b에 사고를 켜고 돌려 보면(`OPENAI_COMPAT_REASONING_EFFORT` 비움, 최대 출력 8000) 외국 문자가 한 번도 안 끼고 깃발도 없었지만, 사고가 9천~3만 자라 턴당 4분 20초~11분 걸렸어요(표본이 3턴뿐이에요). 표와 해석은 `docs/improvement-plan.md`의 "후속 보강"에 있어요.
+
+같은 대본을 변형마다 2회씩 반복하며 프롬프트와 샘플링 값을 바꿔 보면, 회차 사이 차이가 변형 사이 차이보다 큰 경우가 많아요(2026-11-10, Ollama 0.40.16). 2b의 `<system-memo>` 샘은 96턴 동안 한 번도 재현되지 않았고, 대신 한 회차에서 `<br>`·`<sup>` 같은 HTML 태그를 넣기 시작해 11턴 동안 따라 했어요. `top_p`·`presence_penalty`를 Modelfile 값으로 맞춘 변형도 같은 조건의 두 회차가 외국 글자 2자와 25자로 갈렸어요. 작은 모델은 이상한 답을 한 번 내면 그 뒤를 따라 하기 때문에, 한 번 돌린 결과로 설정을 판단하지 말고 **반복**해서 반복 사이 편차를 함께 보세요. 표와 해석은 `docs/improvement-plan.md`의 "다음 단계"에 있어요.
 
 ## 구조
 
