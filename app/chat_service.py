@@ -28,7 +28,7 @@ from typing import AsyncIterator, Callable
 from . import config, memory, moderation, pricing, quality
 from .db import DB
 from .moderation import ModResult
-from .prompt import assemble, load_prompt, persona_name
+from .prompt import assemble, load_prompt, memo_markers, persona_name
 from .providers import ChatRequest, Provider, ProviderError, get_provider
 from .runinfo import run_info
 
@@ -190,7 +190,8 @@ class ChatService:
             if crisis or settings["moderation_mode"] == "block":
                 user_id = self.db.add_message(chat["id"], parent_id, "user", content, meta=meta, excluded=True)
                 kind = "crisis" if crisis else "blocked"
-                text = load_prompt("crisis.txt") if crisis else BLOCK_NOTICE.format(category=result.category)
+                text = (load_prompt("crisis.txt", settings.get("prompt_overrides")) if crisis
+                        else BLOCK_NOTICE.format(category=result.category))
                 # 답변이 없어도 입력 판정 비용은 들었으므로 안내 메시지에 실행 조건과 함께 남긴다
                 aux = [e for e in [aux_entry("judge_input", result)] if e]
                 notice_id = self.db.add_message(chat["id"], user_id, "notice", text,
@@ -231,6 +232,7 @@ class ChatService:
                 "lore": [h.entry["name"] for h in asm.lore.hits],
                 "input": user_msg["content"],
             },
+            options=config.provider_overrides(settings, provider.name),
         )
         payload = provider.render(req)
         diagnostics = asm.diagnostics()
@@ -374,7 +376,9 @@ class ChatService:
             if gate is None:
                 output_check = moderation.RULES.check(raw_text)
             if (output_check is None or not output_check.flagged) and settings["moderation_backend"] == "llm":
-                output_check = await moderation.llm_judge(provider, mod_model, raw_text)
+                output_check = await moderation.llm_judge(
+                    provider, mod_model, raw_text, options=config.provider_overrides(settings, provider.name),
+                    prompts=settings.get("prompt_overrides"))
             if output_check and output_check.flagged:
                 if mode == "block":
                     retracted = output_check
@@ -412,7 +416,8 @@ class ChatService:
         # 답변 품질 어림 지표. 가려진 답, 안내문, 오류로 잘린 답은 재지 않는다(멈춤으로 잘린 답처럼 비교가 안 된다)
         if not excluded and not error and content.strip():
             previous = [m["content"] for m in prior if m["role"] == "assistant" and not m.get("excluded")][-5:]
-            meta["quality"] = quality.measure(content, previous)
+            # 마지막 메시지 템플릿의 <태그>가 답에 나오면 프롬프트가 샌 것이다. 덮어쓴 템플릿의 태그도 따라간다
+            meta["quality"] = quality.measure(content, previous, markers=memo_markers(settings.get("prompt_overrides")))
 
         message_id = db.add_message(chat["id"], user_msg["id"], "assistant", content, meta=meta, excluded=excluded)
         db.set_active_leaf(chat["id"], message_id)

@@ -30,21 +30,31 @@ PLACEHOLDER_START = "(이야기 시작)"
 PLACEHOLDER_AFTER_SUMMARY = "(이전 줄거리에 이어서)"
 
 
-def load_prompt(name: str) -> str:
-    """prompts/ 폴더의 템플릿을 매번 다시 읽는다. 서버를 재시작하지 않아도 수정이 바로 반영된다."""
+def load_prompt(name: str, overrides: dict | None = None) -> str:
+    """prompts/ 폴더의 템플릿을 매번 다시 읽는다. 서버를 재시작하지 않아도 수정이 바로 반영된다.
+
+    overrides는 설정의 prompt_overrides({파일 이름: 내용})다. 대본 재생 실험의 변형마다 프롬프트를 바꿔 볼 때 쓴다.
+    """
+    if overrides and name in overrides:
+        return overrides[name]
     return (config.PROMPTS_DIR / name).read_text(encoding="utf-8").strip()
 
 
-def prompts_fingerprint() -> str:
+def prompts_fingerprint(overrides: dict | None = None) -> str:
     """prompts/*.txt의 이름과 내용으로 만든 8자 지문. 프롬프트 파일을 고친 전후를 실행 조건으로 구분한다.
 
     load_prompt처럼 매번 다시 읽는다(파일이 몇 개 안 되고 작다). 내용은 load_prompt가 읽는 그대로 써서
-    줄바꿈 방식(CRLF/LF)이나 끝 공백만 다른 경우는 같은 지문이 된다.
+    줄바꿈 방식(CRLF/LF)이나 끝 공백만 다른 경우는 같은 지문이 된다. 설정으로 덮어쓴 파일은 덮어쓴 내용으로 센다.
     """
     digest = hashlib.sha1()
     for path in sorted(config.PROMPTS_DIR.glob("*.txt"), key=lambda p: p.name):
-        digest.update(f"{path.name}\0{load_prompt(path.name)}".encode("utf-8"))
+        digest.update(f"{path.name}\0{load_prompt(path.name, overrides)}".encode("utf-8"))
     return digest.hexdigest()[:8]
+
+
+def memo_markers(overrides: dict | None = None) -> list[str]:
+    """마지막 메시지 템플릿에 쓰인 <태그> 이름들. 답에 그대로 나오면 프롬프트가 샌 것이다(답변 품질의 '프롬프트 샘')."""
+    return sorted(set(re.findall(r"</?([A-Za-z][\w-]{2,})>", load_prompt("final_user.txt", overrides))))
 
 
 def fill(template: str, values: dict[str, str]) -> str:
@@ -105,8 +115,9 @@ def format_examples(mes_example: str) -> str:
     return "\n\n".join(f"### 예시 {i + 1}\n{block}" for i, block in enumerate(blocks))
 
 
-def build_fixed(character: dict, user: str, persona_desc: str, constant: list[dict]) -> str:
-    main = load_prompt("main.txt")
+def build_fixed(character: dict, user: str, persona_desc: str, constant: list[dict],
+                prompts: dict | None = None) -> str:
+    main = load_prompt("main.txt", prompts)
     custom = (character.get("system_prompt") or "").strip()
     sections = [custom.replace("{{original}}", main) if custom else main]
 
@@ -126,16 +137,17 @@ def build_fixed(character: dict, user: str, persona_desc: str, constant: list[di
     return apply_macros("\n\n".join(sections), character["name"], user)
 
 
-def build_final_user(character: dict, user: str, user_input: str, selection: LoreSelection) -> str:
+def build_final_user(character: dict, user: str, user_input: str, selection: LoreSelection,
+                     prompts: dict | None = None) -> str:
     char = character["name"]
     lore_text = ""
     if selection.hits:
         lines = "\n".join(f"- {h.entry['name']}: {h.entry['content'].strip()}" for h in selection.hits)
         lore_text = f"[참고 설정]\n{lines}\n\n"
-    default_post = load_prompt("post_history.txt")
+    default_post = load_prompt("post_history.txt", prompts)
     custom_post = (character.get("post_history_instructions") or "").strip()
     instructions = custom_post.replace("{{original}}", default_post) if custom_post else default_post
-    template = apply_macros(load_prompt("final_user.txt"), char, user)
+    template = apply_macros(load_prompt("final_user.txt", prompts), char, user)
     return fill(template, {
         "lore": apply_macros(lore_text, char, user),
         "instructions": apply_macros(f"[진행 지시]\n{instructions}", char, user),
@@ -187,9 +199,10 @@ def assemble(character: dict, chat: dict, prior: list[dict], user_input: str, se
     scan_text = "\n".join([m.content for m in eligible[-scan_depth:]] + [user_input])
     selection = select_lore(character.get("lore", []), scan_text, lore_budget)
 
-    fixed = build_fixed(character, user, chat.get("persona_desc", ""), selection.constant)
+    prompts = settings.get("prompt_overrides")
+    fixed = build_fixed(character, user, chat.get("persona_desc", ""), selection.constant, prompts)
     summary_block = f"## 지금까지의 줄거리\n{summary['content'].strip()}" if summary else None
-    final_user = build_final_user(character, user, user_input, selection)
+    final_user = build_final_user(character, user, user_input, selection, prompts)
 
     fixed_t = estimate_tokens(fixed)
     summary_t = estimate_tokens(summary_block) if summary_block else 0

@@ -3,10 +3,13 @@
 - 정적 설정: API 키, 엔드포인트, 제공사별 세부 옵션. .env에서만 바꾼다.
 - 런타임 설정: 화면의 '설정'에서 바꿀 수 있는 값. DB의 settings 테이블에 저장되고
   .env 값은 처음 기본값으로만 쓰인다.
+- 실험용 덮어쓰기: 제공사 옵션(provider_options)과 프롬프트 파일 내용(prompt_overrides)도 런타임 설정이라
+  대본 재생 실험의 변형마다 바꿀 수 있다. 설정 화면에는 나오지 않는다.
 """
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -145,7 +148,101 @@ SETTINGS_SPEC: dict[str, dict] = {
     "output_buffer": {"type": "choice", "choices": ["sentence", "none"], "default": env("OUTPUT_BUFFER", "sentence")},
     # 실험 라벨: 비교 탭에서 이 이름으로 행을 나눈다
     "run_label": {"type": "text", "max_len": 40, "default": ""},
+    # 실험용 덮어쓰기(설정 화면에는 없다). 비우면 .env 값과 prompts/*.txt를 그대로 쓴다
+    "provider_options": {"type": "provider_options", "default": {}},
+    "prompt_overrides": {"type": "prompt_overrides", "default": {}},
 }
+
+# 변형마다 바꿔 볼 수 있는 제공사 옵션과 값의 종류. 키가 없으면 .env 값을 쓰고, 값이 None이면 .env에 값이
+# 있어도 보내지 않는다(모델 기본값). word는 영문 소문자·밑줄로 된 값(API가 받는지는 API가 판단), unit은 0~1 숫자
+PROVIDER_OPTION_SPEC: dict[str, dict[str, str]] = {
+    "anthropic": {"effort": "word", "thinking": "word"},
+    "gemini": {"thinking_level": "word"},
+    "openai_compat": {"reasoning_effort": "word", "top_p": "unit"},
+}
+_OPTION_WORD = re.compile(r"[a-z_]{1,24}")
+
+# 덮어쓴 프롬프트에 꼭 있어야 하는 자리표시자. 빠지면 사용자의 입력이나 요약할 대화가 요청에서 사라진다
+REQUIRED_PLACEHOLDERS = {"final_user.txt": ("{input}",), "summary_user.txt": ("{dialogue}",)}
+PROMPT_OVERRIDE_MAX_CHARS = 20000
+MERGED_SETTINGS = ("models", "provider_options", "prompt_overrides")
+
+
+def prompt_file_name(name) -> str:
+    """'final_user'와 'final_user.txt'를 같은 파일 이름으로 맞춘다."""
+    name = str(name).strip()
+    return name if name.endswith(".txt") else f"{name}.txt"
+
+
+def provider_overrides(settings: dict, provider: str) -> dict:
+    """설정에 적힌 그 제공사의 옵션 덮어쓰기. 없으면 빈 dict(.env 값을 그대로 쓴다)."""
+    return dict((settings.get("provider_options") or {}).get(provider) or {})
+
+
+def _coerce_option(path: str, kind: str, value):
+    if value is None or value == "":
+        return None
+    if kind == "word":
+        text = str(value).strip().lower()
+        if not _OPTION_WORD.fullmatch(text):
+            raise SettingsError(f"{path}: 영문 소문자와 밑줄로 된 값이어야 합니다(보내지 않으려면 null)")
+        return text
+    if isinstance(value, bool):
+        raise SettingsError(f"{path}: 0~1 사이 숫자여야 합니다(보내지 않으려면 null)")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise SettingsError(f"{path}: 0~1 사이 숫자여야 합니다(보내지 않으려면 null)") from None
+    if not 0 <= number <= 1:
+        raise SettingsError(f"{path}: 0~1 사이 숫자여야 합니다(보내지 않으려면 null)")
+    return number
+
+
+def _coerce_provider_options(value) -> dict:
+    if not isinstance(value, dict):
+        raise SettingsError('provider_options: {"제공사": {"옵션": 값}} 형태여야 합니다')
+    result = {}
+    for provider, options in value.items():
+        allowed = PROVIDER_OPTION_SPEC.get(provider)
+        if allowed is None:
+            raise SettingsError(f"provider_options: 옵션을 바꿀 수 없는 제공사예요({provider}). "
+                                f"{', '.join(PROVIDER_OPTION_SPEC)} 중 하나여야 합니다")
+        if options is None:  # 그 제공사의 덮어쓰기를 모두 지운다
+            continue
+        if not isinstance(options, dict):
+            raise SettingsError(f"provider_options.{provider}: {{옵션: 값}} 형태여야 합니다")
+        clean = {}
+        for name, option in options.items():
+            if name not in allowed:
+                raise SettingsError(f"provider_options.{provider}: 알 수 없는 옵션이에요({name}). "
+                                    f"{', '.join(allowed)} 중 하나여야 합니다")
+            clean[name] = _coerce_option(f"provider_options.{provider}.{name}", allowed[name], option)
+        if clean:
+            result[provider] = clean
+    return result
+
+
+def _coerce_prompt_overrides(value) -> dict:
+    if not isinstance(value, dict):
+        raise SettingsError('prompt_overrides: {"파일 이름": "내용"} 형태여야 합니다')
+    known = sorted(path.name for path in PROMPTS_DIR.glob("*.txt"))
+    result = {}
+    for raw_name, text in value.items():
+        name = prompt_file_name(raw_name)
+        if name not in known:
+            raise SettingsError(f"prompt_overrides: prompts 폴더에 없는 파일이에요({name}). {', '.join(known)} 중 하나여야 합니다")
+        if text is None:  # 덮어쓰기를 지운다
+            continue
+        if not isinstance(text, str) or not text.strip():
+            raise SettingsError(f"prompt_overrides.{name}: 비어 있지 않은 글이어야 합니다(지우려면 null)")
+        text = text.replace("\r\n", "\n").strip()  # load_prompt가 파일을 읽는 모양과 맞춘다
+        if len(text) > PROMPT_OVERRIDE_MAX_CHARS:
+            raise SettingsError(f"prompt_overrides.{name}: {PROMPT_OVERRIDE_MAX_CHARS}자를 넘을 수 없어요")
+        missing = [p for p in REQUIRED_PLACEHOLDERS.get(name, ()) if p not in text]
+        if missing:
+            raise SettingsError(f"prompt_overrides.{name}: {', '.join(missing)} 자리표시자가 있어야 해요")
+        result[name] = text
+    return result
 
 
 class SettingsError(ValueError):
@@ -181,7 +278,30 @@ def coerce_setting(key: str, value):
         return {k: str(v).strip() for k, v in value.items() if k in PROVIDERS}
     if kind == "text":
         return "" if value is None else str(value).strip()[: spec["max_len"]]
+    if kind == "provider_options":
+        return _coerce_provider_options(value)
+    if kind == "prompt_overrides":
+        return _coerce_prompt_overrides(value)
     raise SettingsError(f"{key}: 지원하지 않는 형식")
+
+
+def merge_setting(key: str, current, value):
+    """저장된 값에 새 값을 얹는다. 제공사별 모델·옵션과 프롬프트 덮어쓰기는 통째로 바꾸지 않고 합친다.
+
+    합치는 설정에서 항목 값이 None이면 그 항목(제공사의 옵션 묶음, 프롬프트 파일)을 지운다. 제공사 옵션
+    하나의 None은 '보내지 않음'이라는 값이라 지우지 않고 남긴다.
+    """
+    kind = SETTINGS_SPEC.get(key, {}).get("type")
+    if key not in MERGED_SETTINGS or not isinstance(value, dict):
+        return coerce_setting(key, value)
+    merged = dict(current or {})
+    for name, item in value.items():
+        if kind == "prompt_overrides":
+            name = prompt_file_name(name)
+        if kind == "provider_options" and isinstance(item, dict) and isinstance(merged.get(name), dict):
+            item = {**merged[name], **item}
+        merged[name] = item
+    return coerce_setting(key, merged)
 
 
 class Settings(dict):

@@ -940,7 +940,7 @@ function turnHtml(meta, messageId, pending) {
           <dt>캐시 방식</dt><dd>${CACHE_LABELS[run.cache_mode] || run.cache_mode}</dd>
           <dt>검수</dt><dd>${escapeHtml(run.moderation_mode)}, ${escapeHtml(run.moderation_backend)}</dd>
           <dt>출력 버퍼</dt><dd>${escapeHtml(run.output_buffer)}</dd>
-          ${options ? `<dt>.env 옵션</dt><dd>${escapeHtml(options)}</dd>` : ''}
+          ${options ? `<dt>제공사 옵션</dt><dd>${escapeHtml(options)}</dd>` : ''}
           ${run.prompt_version ? `<dt>프롬프트 버전</dt><dd>${escapeHtml(run.prompt_version)}</dd>` : ''}
           ${meta.finish_reason ? `<dt>종료 이유</dt><dd>${FINISH_LABELS[meta.finish_reason] || escapeHtml(meta.finish_reason)}</dd>` : ''}
         </dl>
@@ -970,12 +970,12 @@ function conditionText(field, value) {
 
 const optionTexts = (options, keys) => (options
   ? keys.map((key) => `${key} ${options[key] ?? '기본'}`)
-  : ['.env 옵션 기록 없음']);
+  : ['제공사 옵션 기록 없음']);
 
 /* 비교 표. 비교 탭(대화 하나)과 실험 탭(여러 대화)이 함께 쓴다.
    설정 칸에는 라벨과 모델, 그리고 행마다 다른 조건(varying)만 보여 주고, 같은 조건은 표 아래에 한 번만 적는다. */
 function compareTable(groups, varying) {
-  // .env 옵션은 묶음째 다르다고 나오므로, 그 안에서도 실제로 값이 다른 키만 고른다
+  // 제공사 옵션은 묶음째 다르다고 나오므로, 그 안에서도 실제로 값이 다른 키만 고른다
   const optionKeys = [...new Set(groups.flatMap((g) => Object.keys(g.options || {})))]
     .filter((key) => new Set(groups.map((g) => JSON.stringify(g.options?.[key] ?? null))).size > 1);
   const rows = groups.map((g) => {
@@ -1036,7 +1036,7 @@ async function renderCompareTab() {
         <h3>설정별 비교 (이 대화의 모든 가지)</h3>
         ${compareTable(data.groups, data.varying)}
         ${note('입력은 턴당 평균 입력 토큰, 캐시는 입력 중 캐시에서 읽은 비율, 비용은 대화에 요약과 LLM 검수 판정을 더한 합계, 첫 토큰과 첫 표시는 평균이에요.')}
-        ${note('실험 라벨, 모델, 창 전략, 입력 예산, 캐시 방식, 출력 버퍼, .env의 사고 설정, 프롬프트 파일 중 하나라도 다르면 행이 나뉘어요. 설정 칸에는 행마다 다른 조건만 보여요. 비용은 가격표가 있는 모델만 계산해요(app/pricing.py, pricing.json).')}
+        ${note('실험 라벨, 모델, 창 전략, 입력 예산, 캐시 방식, 출력 버퍼, 제공사 옵션(.env나 실험 변형의 사고·샘플링 설정), 프롬프트(파일이나 실험 변형의 덮어쓰기) 중 하나라도 다르면 행이 나뉘어요. 설정 칸에는 행마다 다른 조건만 보여요. 비용은 가격표가 있는 모델만 계산해요(app/pricing.py, pricing.json).')}
       </section>
       ${state.config?.settings.provider === 'mock' ? `
       <section class="panel-block">
@@ -1124,18 +1124,50 @@ const experimentStatus = (status) => EXPERIMENT_STATUS[status] || escapeHtml(sta
 
 function experimentProgress(e) {
   const p = e.progress || {};
+  const repeats = p.repeats || 1; // 반복을 넣기 전의 기록에는 없다
   return e.status === 'running'
-    ? `변형 ${p.variant}/${p.variants} · 턴 ${p.turn}/${p.turns}`
-    : `입력 ${p.turns ?? '?'}개 × 변형 ${p.variants ?? '?'}개`;
+    ? `${repeats > 1 ? `반복 ${p.repeat}/${repeats} · ` : ''}변형 ${p.variant}/${p.variants} · 턴 ${p.turn}/${p.turns}`
+    : `입력 ${p.turns ?? '?'}개 × 변형 ${p.variants ?? '?'}개${repeats > 1 ? ` × 반복 ${repeats}번` : ''}`;
+}
+
+/* 반복 사이의 편차. 끝까지 돈 대화 하나를 표본 하나로 보고 '평균 ± 표준편차'로 보여 준다 */
+function spreadTable(spread) {
+  const cell = (d, format) => (d
+    ? `${format(d.mean)}${d.sd !== null ? `<span class="cell-sub">± ${format(d.sd)}</span>` : ''}`
+    : '–');
+  const rows = Object.entries(spread).map(([label, s]) => `
+      <tr>
+        <td><b>${escapeHtml(label)}</b></td>
+        <td>${s.runs}</td>
+        <td>${cell(s.avg_input, fmt)}</td>
+        <td>${cell(s.cache_hit_ratio, ratio)}</td>
+        <td>${cell(s.total_usd, usd)}</td>
+        <td>${cell(s.median_ttft_ms, ms)}</td>
+        <td>${cell(s.foreign_turn_ratio, ratio)}</td>
+        <td>${cell(s.avg_repeat_prev, ratio)}</td>
+        <td>${cell(s.leak_turn_ratio, ratio)}</td>
+        <td>${cell(s.flagged_turn_ratio, ratio)}</td>
+      </tr>`).join('');
+  return `
+    <div class="table-scroll">
+      <table class="compare">
+        <thead><tr><th>변형</th><th>표본</th><th>입력</th><th>캐시</th><th>비용</th><th>첫 토큰 중앙값</th>
+          <th>외국 문자 낀 턴</th><th>직전 답 겹침</th><th>프롬프트 샘 턴</th><th>깃발 턴</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
 }
 
 function experimentDetailHtml(e) {
   const p = e.progress || {};
-  const done = Math.max(0, (p.variant - 1) * p.turns + p.turn);
-  const share = p.variants && p.turns ? done / (p.variants * p.turns) : 0;
+  const repeats = p.repeats || 1;
+  const total = (p.runs || p.variants) * p.turns; // 옛 기록에는 runs(대화 수)가 없다
+  const done = Math.max(0, ((p.run ?? p.variant) - 1) * p.turns + p.turn);
+  const share = total ? done / total : 0;
+  const spread = e.stats?.spread && Object.keys(e.stats.spread).length ? e.stats.spread : null;
   const runs = e.runs.map((run) => `
     <tr>
-      <td><b>${escapeHtml(run.label)}</b>${run.error ? `<span class="cell-sub">${escapeHtml(run.error)}</span>` : ''}</td>
+      <td><b>${escapeHtml(run.label)}</b>${repeats > 1 ? ` <span class="muted">${run.repeat}회</span>` : ''}${run.error ? `<span class="cell-sub">${escapeHtml(run.error)}</span>` : ''}</td>
       <td>${experimentStatus(run.status)}</td>
       <td>${run.turns_done}/${p.turns ?? '?'}</td>
       <td>${run.blocked}</td>
@@ -1164,7 +1196,13 @@ function experimentDetailHtml(e) {
     <section class="panel-block">
       <h3>결과 비교${e.status === 'running' ? ' (진행 중)' : ''}</h3>
       ${compareTable(groups, e.stats.varying)}
-      ${note('변형마다 새 대화에서 같은 대본을 처음부터 보낸 결과예요. 변형의 라벨이 실험 라벨이라 행이 변형별로 나뉘어요.')}
+      ${note(`변형마다 새 대화에서 같은 대본을 처음부터 보낸 결과예요. 변형의 라벨이 실험 라벨이라 행이 변형별로 나뉘어요.${repeats > 1 ? ' 반복한 회차의 턴은 한데 모아 셌어요.' : ''}`)}
+    </section>` : ''}
+    ${spread ? `
+    <section class="panel-block">
+      <h3>반복 사이 편차</h3>
+      ${spreadTable(spread)}
+      ${note('끝까지 돈 대화 하나를 표본 하나로 보고 평균과 표준편차(±)를 냈어요. 변형 사이의 차이가 표준편차보다 충분히 커야 설정의 차이라고 볼 수 있어요. 품질 칸은 잰 턴 가운데 해당 턴의 비율이에요.')}
     </section>` : ''}`;
 }
 
@@ -1379,7 +1417,7 @@ function collectVariants() {
 
 // 실제 제공사로 보내는 실험을 시작하기 전에 묻는 글. 비용은 입력 예산과 최대 출력을 다 쓴다고 본 상한이다
 function estimateText(estimate) {
-  const lines = ['실제 API를 부르는 실험이에요.', ''];
+  const lines = [`실제 API를 부르는 실험이에요.${estimate.repeats > 1 ? ` 변형마다 ${estimate.repeats}번 반복해요.` : ''}`, ''];
   for (const v of estimate.variants.filter((row) => row.provider !== 'mock')) {
     const calls = `대화 ${v.chat_calls}회${v.judge_calls ? ` + 검수 판정 ${v.judge_calls}회` : ''}${v.summary_possible ? ' + 요약(필요할 때)' : ''}`;
     lines.push(`· ${v.label} (${v.provider} · ${v.model}): ${calls}, 비용 상한 ${v.max_usd === null ? '가격표 없음' : usd(v.max_usd)}`);
@@ -1388,7 +1426,7 @@ function estimateText(estimate) {
   lines.push('', `호출 ${estimate.paid_calls}회 이상, 비용 상한 합계 ${usd(estimate.paid_max_usd)}${unpriced}`);
   lines.push('상한은 매 턴 입력 예산과 최대 출력을 모두 쓴다고 본 값이에요. 캐시 할인과 요약 비용은 빠져 있어요.');
   if (estimate.cache_overlap) {
-    lines.push('', `⚠ 변형 사이 대기가 ${estimate.cooldown_seconds}초예요. 캐시 수명(${estimate.cache_ttl_seconds}초)보다 짧아서 앞 변형의 캐시가 뒤 변형에 섞이고, 캐시 적중률과 첫 토큰 시간 비교가 틀어질 수 있어요.`);
+    lines.push('', `⚠ 대화 사이 대기가 ${estimate.cooldown_seconds}초예요. 캐시 수명(${estimate.cache_ttl_seconds}초)보다 짧아서 같은 모델로 보내는 앞 대화(다른 변형이나 앞 회차)의 캐시가 뒤 대화에 섞이고, 캐시 적중률과 첫 토큰 시간 비교가 틀어질 수 있어요.`);
   }
   lines.push('', '계속할까요?');
   return lines.join('\n');
@@ -1418,6 +1456,7 @@ async function submitExperiment(event) {
     seed: seed === '' ? null : Number(seed),
     wait_summary: form.elements.wait_summary.checked,
     cooldown_seconds: Number(form.elements.cooldown_seconds.value || 0),
+    repeats: Number(form.elements.repeats.value || 1),
   };
   try {
     // mock이 아닌 제공사로 보내는 변형이 있으면 호출 수와 비용 상한을 보여 주고 한 번 묻는다

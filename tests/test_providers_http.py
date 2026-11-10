@@ -307,3 +307,52 @@ def test_openai_compat_reasoning_field_and_options(fake_server, monkeypatch):
     assert "".join(ev.text for ev in events[kinds.index("reset"):] if ev.type == "text") == "안녕하세요"
     assert body["reasoning_effort"] == "none" and body["top_p"] == 0.95
     assert complete_body["reasoning_effort"] == "none" and complete_body["top_p"] == 0.95
+
+
+# ── 설정의 제공사 옵션 덮어쓰기(provider_options) ──────────────
+# 키가 있으면 .env 값 대신 그 값을 쓰고, None이면 .env에 값이 있어도 보내지 않는다(모델 기본값).
+
+def test_openai_compat_option_overrides(fake_server, monkeypatch):
+    from app.providers.openai_compat import OpenAICompatProvider
+
+    monkeypatch.setattr(config, "OPENAI_COMPAT_BASE_URL", f"{fake_server}/v1")
+    monkeypatch.setattr(config, "OPENAI_COMPAT_API_KEY", None)
+    monkeypatch.setattr(config, "OPENAI_COMPAT_REASONING_EFFORT", "none")
+    monkeypatch.setattr(config, "OPENAI_COMPAT_TOP_P", 0.95)
+    provider = OpenAICompatProvider()
+    overrides = {"reasoning_effort": "low", "top_p": None}
+    body = provider.render(request(model="local-model", options=overrides))
+    assert body["reasoning_effort"] == "low" and "top_p" not in body
+    assert provider.options(overrides) == {"reasoning_effort": "low", "top_p": None, "max_tokens_param": "max_tokens"}
+    assert provider.options() == {"reasoning_effort": "none", "top_p": 0.95, "max_tokens_param": "max_tokens"}
+    asyncio.run(provider.complete("sys", "user", "local-model", 100, options={"reasoning_effort": None}))
+    sent = RECORDED[-1]["body"]  # 요약·검수 호출에도 같은 덮어쓰기가 들어간다
+    assert "reasoning_effort" not in sent and sent["top_p"] == 0.95
+
+
+def test_anthropic_option_overrides(monkeypatch):
+    from app.providers.anthropic_provider import AnthropicProvider
+
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr(config, "ANTHROPIC_EFFORT", "low")
+    monkeypatch.setattr(config, "ANTHROPIC_THINKING", None)
+    provider = AnthropicProvider()
+    body = provider.render(request(options={"effort": "high", "thinking": "disabled"}))
+    assert body["output_config"] == {"effort": "high"} and body["thinking"] == {"type": "disabled"}
+    assert body["max_tokens"] == 700  # 사고를 끄면 사고 여유분을 더하지 않는다
+    assert "output_config" not in provider.render(request(options={"effort": None}))
+    assert provider.options({"thinking": "disabled"}) == {"effort": "low", "thinking": "disabled", "thinking_headroom": 0}
+    assert provider.options()["thinking_headroom"] == 2048
+
+
+def test_gemini_option_overrides(fake_server, monkeypatch):
+    from app.providers.gemini_provider import GeminiProvider
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "GEMINI_BASE_URL", fake_server)
+    monkeypatch.setattr(config, "GEMINI_THINKING_LEVEL", "low")
+    provider = GeminiProvider()
+    assert provider.render(request(options={"thinking_level": "high"}))["config"]["thinking_config"] == {"thinking_level": "high"}
+    assert "thinking_config" not in provider.render(request(options={"thinking_level": None}))["config"]
+    assert provider.options({"thinking_level": "minimal"})["thinking_level"] == "minimal"
+    assert provider.options()["thinking_level"] == "low"

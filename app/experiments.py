@@ -6,8 +6,11 @@ README의 비교표를 손으로 15턴씩 보내 만들던 일을 대신한다.
 
 - 한 번에 하나만 돌린다. mock의 흉내 캐시와 답변 난수를 모든 대화가 함께 쓰기 때문이다.
 - mock은 변형마다 캐시를 비우고 난수를 다시 심어(reset_mock) 같은 조건에서 시작한다. 실제 제공사의
-  캐시는 비울 수 없으니, 변형 사이에 기다려(cooldown_seconds) 앞 변형의 캐시가 만료되게 한다.
+  캐시는 비울 수 없으니, 대화 사이에 기다려(cooldown_seconds) 앞 대화의 캐시가 만료되게 한다.
 - 매 턴 요약이 끝날 때까지 기다린다(wait_summary). 요약이 늦으면 다음 턴이 잘려(overflow) 결과가 흔들린다.
+- 같은 대본을 여러 번 돌릴 수 있다(repeats). 반복 1회차에 모든 변형, 2회차에 모든 변형 순으로 번갈아 돌려
+  시간에 따라 바뀌는 조건(로컬 모델의 적재 상태 등)이 한 변형에만 몰리지 않게 한다. mock의 시드는 반복마다
+  하나씩 바꾸고, 같은 회차의 변형끼리는 같은 시드로 맞춘다. 반복 사이의 편차는 run_spread로 낸다.
 - 진행 상황은 experiments 표에 남긴다. 서버를 끄면 진행 중이던 실험은 interrupted가 된다.
 """
 from __future__ import annotations
@@ -17,6 +20,7 @@ import csv
 import io
 import json
 import time
+from collections import Counter
 from contextlib import aclosing
 
 from . import config, memory, pricing
@@ -30,6 +34,7 @@ MAX_INPUT_CHARS = 2000
 MAX_VARIANTS = 6
 MAX_LABEL_CHARS = 40
 MAX_COOLDOWN_SECONDS = 600
+MAX_REPEATS = 5
 # 실제 제공사의 캐시는 이만큼 지나야 만료된다고 보고 경고한다(Anthropic 기본 5분)
 CACHE_TTL_SECONDS = 300
 
@@ -37,6 +42,9 @@ CSV_FIELDS = (*GROUP_FIELDS, "turns", "avg_input", "cache_hit_ratio", "usd", "ju
               "summary_calls", "summary_usd", "total_usd", "avg_ttft_ms", "median_ttft_ms", "avg_first_visible_ms",
               "median_first_visible_ms", "quality_turns", "avg_foreign_ratio", "foreign_turns", "avg_latin_ratio",
               "avg_repeat_prev", "speech_shift_turns", "leak_turns", "flagged_turns")
+# 반복 사이에 견주는 값. 품질 지표는 턴 수가 반복마다 다를 수 있어 잰 턴에 대한 비율로 본다
+SPREAD_FIELDS = ("avg_input", "cache_hit_ratio", "total_usd", "median_ttft_ms", "median_first_visible_ms",
+                 "foreign_turn_ratio", "avg_repeat_prev", "speech_shift_ratio", "leak_turn_ratio", "flagged_turn_ratio")
 
 
 def _sse_error(chunk: str) -> str | None:
@@ -49,17 +57,71 @@ def _sse_error(chunk: str) -> str | None:
         return None
 
 
-def stats_csv(groups: list[dict]) -> str:
-    """비교 집계를 CSV로. README 표를 만들 때 쓴다(엑셀이 한글을 알아보도록 BOM을 붙인다)."""
+def stats_csv(groups: list[dict], spread: dict | None = None) -> str:
+    """비교 집계를 CSV로. README 표를 만들 때 쓴다(엑셀이 한글을 알아보도록 BOM을 붙인다).
+    반복한 실험이면 행마다 반복 수(runs)와 반복 사이 표준편차(…_sd)를 덧붙인다."""
     out = io.StringIO()
     writer = csv.writer(out)
-    writer.writerow(CSV_FIELDS)
+    writer.writerow((*CSV_FIELDS, "runs", *(f"{f}_sd" for f in SPREAD_FIELDS)))
     for group in groups:
+        described = (spread or {}).get(group.get("label")) or {}
         writer.writerow([
-            json.dumps(group.get(f), ensure_ascii=False, sort_keys=True) if isinstance(group.get(f), dict) else group.get(f)
-            for f in CSV_FIELDS
+            *(json.dumps(group.get(f), ensure_ascii=False, sort_keys=True) if isinstance(group.get(f), dict)
+              else group.get(f) for f in CSV_FIELDS),
+            described.get("runs"),
+            *((described.get(f) or {}).get("sd") for f in SPREAD_FIELDS),
         ])
     return "﻿" + out.getvalue()
+
+
+def _sample(group: dict) -> dict:
+    """대화 하나(반복 한 번)의 집계에서 반복 사이에 견줄 값을 뽑는다."""
+    measured = group["quality_turns"]
+
+    def per_turn(field: str) -> float | None:
+        return group[field] / measured if measured else None
+
+    return {
+        "avg_input": group["avg_input"] if group["turns"] else None,
+        "cache_hit_ratio": group["cache_hit_ratio"] if group["input_total"] else None,
+        "total_usd": group["total_usd"] if group["has_cost"] else None,
+        "median_ttft_ms": group["median_ttft_ms"],
+        "median_first_visible_ms": group["median_first_visible_ms"],
+        "foreign_turn_ratio": per_turn("foreign_turns"),
+        "avg_repeat_prev": group["avg_repeat_prev"],
+        "speech_shift_ratio": per_turn("speech_shift_turns"),
+        "leak_turn_ratio": per_turn("leak_turns"),
+        "flagged_turn_ratio": per_turn("flagged_turns"),
+    }
+
+
+def _describe(values: list[float]) -> dict | None:
+    """평균과 표본 표준편차(n-1로 나눔). 표본이 하나면 표준편차는 None이다."""
+    if not values:
+        return None
+    mean = sum(values) / len(values)
+    sd = (sum((v - mean) ** 2 for v in values) / (len(values) - 1)) ** 0.5 if len(values) > 1 else None
+    return {"mean": round(mean, 6), "sd": None if sd is None else round(sd, 6), "n": len(values)}
+
+
+def run_spread(service: ChatService, runs: list[dict]) -> dict:
+    """반복 실행의 편차. 라벨마다 끝까지 돈 대화 하나를 표본 하나로 보고 평균과 표준편차를 낸다.
+
+    비교 표의 값은 모든 반복의 턴을 한데 모은 것이라, 변형 사이의 차이가 반복마다 흔들리는 정도보다 큰지는
+    이 값으로 본다. 오류나 취소로 중간에 멈춘 대화는 턴 수가 달라 표본에서 뺀다.
+    """
+    samples: dict[str, list[dict]] = {}
+    for run in runs:
+        if run.get("status") != "done" or not run.get("chat_id"):
+            continue
+        groups = service.stats_for_chats([run["chat_id"]])["groups"]
+        group = max(groups, key=lambda g: g["turns"], default=None)
+        if group and group["turns"]:
+            samples.setdefault(run["label"], []).append(_sample(group))
+    return {
+        label: {"runs": len(rows), **{f: _describe([row[f] for row in rows if row[f] is not None]) for f in SPREAD_FIELDS}}
+        for label, rows in samples.items()
+    }
 
 
 class ExperimentRunner:
@@ -80,7 +142,9 @@ class ExperimentRunner:
 
     # ── 검증 ─────────────────────────────────────
     @staticmethod
-    def _variant_values(label: str, settings) -> dict:
+    def _variant_values(label: str, settings, saved: dict) -> dict:
+        """변형의 설정을 검사해 저장된 설정에 얹은 값을 돌려준다. 제공사별 모델·옵션과 프롬프트 덮어쓰기는
+        화면에서 설정을 저장할 때처럼 통째로 바꾸지 않고 합친다(merge_setting)."""
         if settings is None:
             return {}
         if not isinstance(settings, dict):
@@ -92,7 +156,7 @@ class ExperimentRunner:
             if key not in config.SETTINGS_SPEC:
                 raise TurnError(f"'{label}' 변형: 알 수 없는 설정이에요({key}).")
             try:
-                values[key] = config.coerce_setting(key, value)
+                values[key] = config.merge_setting(key, saved.get(key), value)
             except config.SettingsError as exc:
                 raise TurnError(f"'{label}' 변형: {exc}") from None
         return values
@@ -129,11 +193,8 @@ class ExperimentRunner:
                 raise TurnError(f"{n}번째 변형의 라벨은 1~{MAX_LABEL_CHARS}자여야 해요.")
             if any(v["label"] == label for v in clean_variants):
                 raise TurnError(f"변형 라벨이 겹쳐요({label}). 라벨은 비교 표의 행 이름이라 서로 달라야 해요.")
-            values = self._variant_values(label, variant.get("settings"))
-            merged = {**overrides, **values, "run_label": label}
-            if "models" in values:  # 화면에서 설정을 저장할 때처럼 제공사별 모델은 덮어쓰지 않고 합친다
-                merged["models"] = {**(overrides.get("models") or {}), **values["models"]}
-            final = config.build_settings(merged)
+            values = self._variant_values(label, variant.get("settings"), overrides)
+            final = config.build_settings({**overrides, **values, "run_label": label})
             if not config.available_providers().get(final["provider"]):
                 raise TurnError(f"'{label}' 변형: 설정되지 않은 제공사예요({final['provider']}). "
                                 ".env를 확인하고 서버를 다시 시작하세요.")
@@ -145,10 +206,14 @@ class ExperimentRunner:
         cooldown = spec.get("cooldown_seconds") or 0
         if isinstance(cooldown, bool) or not isinstance(cooldown, (int, float)) \
                 or not 0 <= cooldown <= MAX_COOLDOWN_SECONDS:
-            raise TurnError(f"변형 사이 대기(cooldown_seconds)는 0~{MAX_COOLDOWN_SECONDS}초여야 해요.")
+            raise TurnError(f"대화 사이 대기(cooldown_seconds)는 0~{MAX_COOLDOWN_SECONDS}초여야 해요.")
         seed = spec.get("seed")
         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
             raise TurnError("seed는 정수이거나 비워 둬야 해요.")
+        repeats = spec.get("repeats")
+        repeats = 1 if repeats is None else repeats
+        if isinstance(repeats, bool) or not isinstance(repeats, int) or not 1 <= repeats <= MAX_REPEATS:
+            raise TurnError(f"반복(repeats)은 1~{MAX_REPEATS}번이어야 해요.")
         clean = {
             "name": str(spec.get("name") or "").strip()[:80] or "이름 없는 실험",
             "character_id": character_id,
@@ -160,6 +225,7 @@ class ExperimentRunner:
             "seed": seed,
             "wait_summary": bool(spec.get("wait_summary", True)),
             "cooldown_seconds": cooldown,
+            "repeats": repeats,
         }
         return clean, built
 
@@ -167,19 +233,20 @@ class ExperimentRunner:
         """시작하기 전에 변형별 호출 수와 비용 상한을 어림한다. 검증은 start와 같아서 잘못된 요청은 TurnError.
 
         비용은 매 턴 입력이 입력 예산을 꽉 채우고 출력도 최대치까지 나온다고 본 상한이다(캐시 할인, 요약 호출,
-        사고 여유분은 뺀다). 가격표에 없는 모델은 max_usd가 None이다.
+        사고 여유분은 뺀다). 가격표에 없는 모델은 max_usd가 None이다. 반복하면 그만큼 곱한다.
         """
         clean, variants = self.validate(spec)
-        turns = len(clean["inputs"])
+        turns, repeats = len(clean["inputs"]), clean["repeats"]
+        calls = turns * repeats
         rows = []
         for label, settings in variants:
             provider, model = settings["provider"], settings.model
             price = pricing.price_for(provider, model)
-            max_input, max_output = turns * settings["input_token_budget"], turns * settings["max_output_tokens"]
+            max_input, max_output = calls * settings["input_token_budget"], calls * settings["max_output_tokens"]
             judged = settings["moderation_mode"] != "off" and settings["moderation_backend"] == "llm"
             rows.append({
                 "label": label, "provider": provider, "model": model,
-                "chat_calls": turns, "judge_calls": 2 * turns if judged else 0,
+                "chat_calls": calls, "judge_calls": 2 * calls if judged else 0,
                 "summary_possible": settings["window_strategy"] == "anchored",
                 "max_input_tokens": max_input, "max_output_tokens": max_output,
                 "max_usd": round((max_input * price["input"] + max_output * price["output"]) / 1_000_000, 6)
@@ -187,15 +254,17 @@ class ExperimentRunner:
             })
         paid = [row for row in rows if row["provider"] != "mock"]
         cooldown = clean["cooldown_seconds"]
+        # 같은 모델로 보내는 대화가 둘 이상(같은 모델의 변형이 여럿이거나 반복)인데 캐시가 만료될 만큼 기다리지
+        # 않으면 앞 대화의 캐시가 뒤 대화에 섞인다(캐시는 모델마다 따로라서 모델이 다른 변형끼리는 섞이지 않는다)
+        per_model = Counter((row["provider"], row["model"]) for row in paid)
         return {
             "turns": turns,
+            "repeats": repeats,
             "variants": rows,
             "paid_calls": sum(row["chat_calls"] + row["judge_calls"] for row in paid),
             "paid_max_usd": round(sum(row["max_usd"] or 0 for row in paid), 6),
             "unpriced": [row["label"] for row in paid if row["max_usd"] is None],
-            # 같은 모델로 보내는 변형이 둘 이상인데 캐시가 만료될 만큼 기다리지 않으면 앞 변형의 캐시가 뒤 변형에 섞인다
-            # (캐시는 모델마다 따로 있어서 모델이 다른 변형끼리는 섞이지 않는다)
-            "cache_overlap": cooldown < CACHE_TTL_SECONDS and len({(r["provider"], r["model"]) for r in paid}) < len(paid),
+            "cache_overlap": cooldown < CACHE_TTL_SECONDS and any(n * repeats > 1 for n in per_model.values()),
             "cooldown_seconds": cooldown,
             "cache_ttl_seconds": CACHE_TTL_SECONDS,
         }
@@ -206,11 +275,8 @@ class ExperimentRunner:
             raise TurnError("이미 실행 중인 실험이 있어요. 끝나거나 취소한 뒤에 시작하세요.", 409)
         clean, variants = self.validate(spec)
         experiment_id = self.db.create_experiment(clean["name"], clean["character_id"], clean)
-        self.db.update_experiment(
-            experiment_id,
-            progress={"variant": 0, "variants": len(variants), "turn": 0, "turns": len(clean["inputs"])},
-            runs=[self._new_run(label) for label, _ in variants],
-        )
+        self.db.update_experiment(experiment_id, progress=self._new_progress(clean, variants),
+                                  runs=self._new_runs(clean, variants))
         task = asyncio.get_running_loop().create_task(self._run(experiment_id, clean, variants))
         self._tasks[experiment_id] = task
         self._uses_mock[experiment_id] = any(settings["provider"] == "mock" for _, settings in variants)
@@ -235,33 +301,47 @@ class ExperimentRunner:
 
     # ── 실행 ─────────────────────────────────────
     @staticmethod
-    def _new_run(label: str) -> dict:
-        return {"label": label, "chat_id": None, "status": "pending", "turns_done": 0, "blocked": 0, "error": None}
+    def _order(spec: dict, variants: list) -> list[tuple[int, int]]:
+        """(반복 회차, 변형 번호) 순서. 1회차에 모든 변형, 2회차에 모든 변형 순으로 번갈아 돈다."""
+        return [(r, i) for r in range(spec["repeats"]) for i in range(len(variants))]
+
+    @classmethod
+    def _new_runs(cls, spec: dict, variants: list) -> list[dict]:
+        return [{"label": variants[i][0], "repeat": r + 1, "chat_id": None, "status": "pending", "turns_done": 0,
+                 "blocked": 0, "error": None} for r, i in cls._order(spec, variants)]
+
+    @staticmethod
+    def _new_progress(spec: dict, variants: list) -> dict:
+        return {"run": 0, "runs": len(variants) * spec["repeats"], "variant": 0, "variants": len(variants),
+                "repeat": 0, "repeats": spec["repeats"], "turn": 0, "turns": len(spec["inputs"])}
 
     async def _run(self, experiment_id: int, spec: dict, variants: list[tuple[str, Settings]]) -> None:
         db, inputs = self.db, spec["inputs"]
-        runs = [self._new_run(label) for label, _ in variants]
-        progress = {"variant": 0, "variants": len(variants), "turn": 0, "turns": len(inputs)}
+        runs = self._new_runs(spec, variants)
+        progress = self._new_progress(spec, variants)
 
         def save(**fields) -> None:
             db.update_experiment(experiment_id, progress=progress, runs=runs, **fields)
 
         try:
-            for i, (label, settings) in enumerate(variants):
-                if i > 0 and spec["cooldown_seconds"]:
+            for index, (r, i) in enumerate(self._order(spec, variants)):
+                label, settings = variants[i]
+                if index > 0 and spec["cooldown_seconds"]:
                     await asyncio.sleep(spec["cooldown_seconds"])
                 if spec["reset_mock"] and settings["provider"] == "mock":
-                    reset_mock(spec["seed"])
-                run = runs[i]
+                    # 반복마다 시드를 하나씩 바꿔 표본을 다르게 하고, 같은 회차의 변형끼리는 같은 시드로 맞춘다
+                    reset_mock(None if spec["seed"] is None else spec["seed"] + r)
+                run = runs[index]
+                title = f"[실험] {spec['name']} · {label}" + (f" · {r + 1}회" if spec["repeats"] > 1 else "")
                 run["chat_id"] = db.create_chat(spec["character_id"], spec["persona_name"], spec["persona_desc"],
-                                                title=f"[실험] {spec['name']} · {label}")
+                                                title=title)
                 run["status"] = "running"
-                progress.update(variant=i + 1, turn=0)
+                progress.update(run=index + 1, variant=i + 1, repeat=r + 1, turn=0)
                 save()
                 for j, text in enumerate(inputs):
                     error = await self._turn(run, text, settings)
                     progress["turn"] = j + 1
-                    if error:  # 이 변형은 멈추고 다음 변형으로 넘어간다
+                    if error:  # 이 대화는 멈추고 다음 대화(변형이나 반복)로 넘어간다
                         run.update(status="error", error=error)
                         break
                     if spec["wait_summary"]:

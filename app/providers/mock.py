@@ -141,7 +141,7 @@ class MockProvider(Provider):
         payload["_note"] = "mock 제공사: 실제로 전송되지 않으며, Anthropic 형식으로 캐시를 흉내 낸다."
         return payload
 
-    def options(self) -> dict:
+    def options(self, overrides: dict | None = None) -> dict:  # mock에는 덮어쓸 옵션이 없다
         return {
             "delay_scale": config.MOCK_DELAY_SCALE,
             "cache_min_tokens": self.cache.min_tokens,
@@ -209,7 +209,7 @@ class MockProvider(Provider):
         yield StreamEvent("done", usage=usage, finish_reason=finish)
 
     async def complete(self, system: str, user: str, model: str, max_tokens: int,
-                       purpose: str = "") -> CompleteResult:
+                       purpose: str = "", options: dict | None = None) -> CompleteResult:
         if config.MOCK_DELAY_SCALE:
             await asyncio.sleep(0.1 * config.MOCK_DELAY_SCALE)
         if purpose == "judge":

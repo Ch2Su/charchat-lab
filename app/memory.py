@@ -77,13 +77,15 @@ async def summarize(db: DB, chat_id: int, chunk: list[Msg], previous: dict | Non
     char, user = character["name"], persona_name(chat)
     speaker = {"user": user, "assistant": char}
     dialogue = "\n".join(f"{speaker[m.role]}: {m.content}" for m in chunk)
-    system = apply_macros(load_prompt("summary_system.txt"), char, user)
-    prompt = fill(load_prompt("summary_user.txt"), {
+    prompts = settings.get("prompt_overrides")
+    system = apply_macros(load_prompt("summary_system.txt", prompts), char, user)
+    prompt = fill(load_prompt("summary_user.txt", prompts), {
         "previous": previous["content"] if previous else "(없음)",
         "dialogue": dialogue,
     })
     started = time.perf_counter()
-    result = await provider.complete(system, prompt, model, 900, purpose="summary")
+    result = await provider.complete(system, prompt, model, 900, purpose="summary",
+                                     options=config.provider_overrides(settings, provider.name))
     text = result.text.strip()
     if not text:
         raise ProviderError("요약 결과가 비어 있어요.")

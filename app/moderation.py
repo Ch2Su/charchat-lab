@@ -102,11 +102,13 @@ def parse_judge(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-async def llm_judge(provider: Provider, model: str, text: str) -> ModResult:
+async def llm_judge(provider: Provider, model: str, text: str, options: dict | None = None,
+                    prompts: dict | None = None) -> ModResult:
+    """options는 제공사 옵션 덮어쓰기, prompts는 프롬프트 덮어쓰기(설정의 provider_options·prompt_overrides)."""
     started = time.perf_counter()
     try:
-        result = await provider.complete(load_prompt("judge.txt"), f"<text>\n{text}\n</text>", model, 200,
-                                         purpose="judge")
+        result = await provider.complete(load_prompt("judge.txt", prompts), f"<text>\n{text}\n</text>", model, 200,
+                                         purpose="judge", options=options)
     except ProviderError as exc:
         return ModResult(False, "none", "llm", reason=f"판정 실패(통과 처리): {exc}",
                          latency_ms=(time.perf_counter() - started) * 1000)
@@ -131,7 +133,8 @@ async def check(text: str, settings: dict, provider: Provider, model: str) -> Mo
     result = RULES.check(text)
     if result.flagged or settings["moderation_backend"] != "llm":
         return result
-    return await llm_judge(provider, model, text)
+    return await llm_judge(provider, model, text, options=config.provider_overrides(settings, provider.name),
+                           prompts=settings.get("prompt_overrides"))
 
 
 _BOUNDARY = re.compile(r"[.!?…。！？~]+[\"”’」』)\]*]*\s+|\n+")

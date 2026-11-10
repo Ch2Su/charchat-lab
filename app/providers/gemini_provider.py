@@ -63,7 +63,14 @@ class GeminiProvider(Provider):
         http_options = types.HttpOptions(base_url=config.GEMINI_BASE_URL) if config.GEMINI_BASE_URL else None
         self.client = genai.Client(api_key=config.GEMINI_API_KEY, http_options=http_options)
 
-    def _config(self, system: str, max_tokens: int, temperature: float | None) -> dict:
+    @staticmethod
+    def _values(overrides: dict | None) -> dict:
+        """.env 값에 설정의 덮어쓰기를 얹는다. None은 보내지 않는다는 뜻이다."""
+        values = {"thinking_level": config.GEMINI_THINKING_LEVEL}
+        values.update(overrides or {})
+        return values
+
+    def _config(self, system: str, max_tokens: int, temperature: float | None, overrides: dict | None = None) -> dict:
         cfg: dict = {
             "system_instruction": system,
             "max_output_tokens": max_tokens + max(0, config.GEMINI_THINKING_HEADROOM),
@@ -73,13 +80,14 @@ class GeminiProvider(Provider):
         threshold = config.GEMINI_SAFETY_THRESHOLD
         if threshold and threshold.upper() != "DEFAULT":
             cfg["safety_settings"] = [{"category": c, "threshold": threshold} for c in SAFETY_CATEGORIES]
-        if config.GEMINI_THINKING_LEVEL:
-            cfg["thinking_config"] = {"thinking_level": config.GEMINI_THINKING_LEVEL}
+        level = self._values(overrides)["thinking_level"]
+        if level:
+            cfg["thinking_config"] = {"thinking_level": level}
         return cfg
 
-    def options(self) -> dict:
+    def options(self, overrides: dict | None = None) -> dict:
         return {
-            "thinking_level": config.GEMINI_THINKING_LEVEL,
+            "thinking_level": self._values(overrides)["thinking_level"],
             "thinking_headroom": max(0, config.GEMINI_THINKING_HEADROOM),
             "safety_threshold": config.GEMINI_SAFETY_THRESHOLD,
         }
@@ -91,7 +99,8 @@ class GeminiProvider(Provider):
             for m in req.history
         ]
         contents.append({"role": "user", "parts": [{"text": req.final_user}]})
-        return {"model": req.model, "contents": contents, "config": self._config(system, req.max_tokens, req.temperature)}
+        return {"model": req.model, "contents": contents,
+                "config": self._config(system, req.max_tokens, req.temperature, req.options)}
 
     async def stream(self, req: ChatRequest) -> AsyncIterator[StreamEvent]:
         from google.genai import errors
@@ -128,12 +137,12 @@ class GeminiProvider(Provider):
         yield StreamEvent("done", usage=_usage(last_meta), finish_reason=reason, detail=detail)
 
     async def complete(self, system: str, user: str, model: str, max_tokens: int,
-                       purpose: str = "") -> CompleteResult:
+                       purpose: str = "", options: dict | None = None) -> CompleteResult:
         from google.genai import errors
 
         try:
             response = await self.client.aio.models.generate_content(
-                model=model, contents=user, config=self._config(system, max_tokens, None)
+                model=model, contents=user, config=self._config(system, max_tokens, None, options)
             )
         except errors.APIError as exc:
             raise _friendly_error(exc) from exc

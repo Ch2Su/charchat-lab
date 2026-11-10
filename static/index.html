@@ -143,14 +143,17 @@
         <button class="btn ghost small" type="button" id="btn-add-variant">변형 추가</button>
       </div>
       <p class="muted small-text">설정 JSON에는 지금 설정에서 바꿀 값만 적어요. 예: <code>{"window_strategy": "full"}</code>, <code>{"input_token_budget": 3000}</code>, <code>{"provider": "openai_compat", "models": {"openai_compat": "qwen3.5:4b"}}</code></p>
+      <p class="muted small-text">.env의 제공사 옵션과 프롬프트 파일도 변형마다 바꿀 수 있어요. 예: <code>{"provider_options": {"openai_compat": {"reasoning_effort": "none", "top_p": 0.95}}}</code>(값을 <code>null</code>로 두면 보내지 않아요), <code>{"prompt_overrides": {"final_user": "{input}\n\n&lt;system-memo&gt;\n{lore}{instructions}\n&lt;/system-memo&gt;"}}</code></p>
       <div class="variant-list" id="variant-list"></div>
       <div class="exp-options">
         <label><input type="checkbox" name="reset_mock" checked> 변형마다 mock 캐시 비우고 난수 다시 심기</label>
         <label class="num">난수 시드 <input type="number" name="seed" step="1" value="7"></label>
         <label><input type="checkbox" name="wait_summary" checked> 매 턴 요약이 끝날 때까지 기다리기</label>
-        <label class="num">변형 사이 대기(초) <input type="number" name="cooldown_seconds" min="0" max="600" step="1" value="0"></label>
+        <label class="num">대화 사이 대기(초) <input type="number" name="cooldown_seconds" min="0" max="600" step="1" value="0"></label>
+        <label class="num">반복 <input type="number" name="repeats" min="1" max="5" step="1" value="1"></label>
       </div>
-      <p class="muted small-text">실제 제공사의 캐시는 비울 수 없어요. 앞 변형의 캐시가 뒤 변형에 섞이지 않게 하려면 변형 사이 대기를 캐시 수명보다 길게 두세요(Anthropic 기본 5분).</p>
+      <p class="muted small-text">실제 제공사의 캐시는 비울 수 없어요. 앞 대화의 캐시가 뒤 대화에 섞이지 않게 하려면 대화 사이 대기를 캐시 수명보다 길게 두세요(Anthropic 기본 5분).</p>
+      <p class="muted small-text">반복하면 같은 대본을 변형마다 여러 번 돌려 반복 사이의 편차를 함께 보여 줘요. 1회차에 모든 변형, 2회차에 모든 변형 순으로 번갈아 돌고, mock은 회차마다 시드를 하나씩 바꿔요.</p>
       <p class="form-error" id="experiment-error" hidden></p>
       <div class="modal-actions">
         <button class="btn ghost" type="button" id="btn-experiment-example">실험 2 예시 채우기</button>

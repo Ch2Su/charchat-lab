@@ -50,6 +50,7 @@ class ChatRequest:
     temperature: float | None
     cache_mode: str = "explicit"      # explicit | auto | off
     hints: dict = field(default_factory=dict)  # mock 제공사만 쓰는 힌트(캐릭터 이름 등)
+    options: dict = field(default_factory=dict)  # 설정의 제공사 옵션 덮어쓰기(.env 값 위에 얹는다)
 
 
 @dataclass
@@ -69,12 +70,13 @@ class Provider:
         raise NotImplementedError
 
     async def complete(self, system: str, user: str, model: str, max_tokens: int,
-                       purpose: str = "") -> CompleteResult:
-        """요약·검수용 단발 호출."""
+                       purpose: str = "", options: dict | None = None) -> CompleteResult:
+        """요약·검수용 단발 호출. options는 ChatRequest.options와 같은 덮어쓰기다."""
         raise NotImplementedError
 
-    def options(self) -> dict:
-        """요청을 만들 때 읽는 .env 옵션(사고 수준 등). 실행 조건으로 턴마다 기록한다."""
+    def options(self, overrides: dict | None = None) -> dict:
+        """요청을 만들 때 쓰는 제공사 옵션(사고 수준 등): .env 값에 설정의 덮어쓰기를 얹은 것.
+        실행 조건으로 턴마다 기록한다."""
         return {}
 
     async def aclose(self) -> None:

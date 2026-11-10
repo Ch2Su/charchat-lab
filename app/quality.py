@@ -126,8 +126,9 @@ def repeat_self_ratio(text: str) -> float:
     return 1 - len(set(sentences)) / len(sentences)
 
 
-def measure(text: str, previous: list[str]) -> dict:
-    """previous: 같은 경로의 직전 assistant 답변들(오래된 것부터, 최대 5개)."""
+def measure(text: str, previous: list[str], markers: list[str] | tuple = ()) -> dict:
+    """previous: 같은 경로의 직전 assistant 답변들(오래된 것부터, 최대 5개).
+    markers: 프롬프트에 쓰인 <태그> 이름들. 답에 나오면 프롬프트 샘으로 본다(system-memo는 늘 본다)."""
     previous = previous[-5:]
     scripts = script_counts(text)
     letters = max(1, sum(scripts.values()))
@@ -138,7 +139,8 @@ def measure(text: str, previous: list[str]) -> dict:
     speech_shift = {speech["level"], speech_prev} == {"polite", "plain"}
     repeat_prev = round(repeat_prev_ratio(text, previous[-1] if previous else None), 4)
     repeat_self = round(repeat_self_ratio(text), 4)
-    leak = bool(_LEAK.search(text))
+    lowered = text.lower()
+    leak = bool(_LEAK.search(text)) or any(marker.lower() in lowered for marker in markers)
     flags = []
     if foreign >= FOREIGN_WARN:
         flags.append("foreign")

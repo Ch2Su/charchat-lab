@@ -14,7 +14,7 @@ from . import config, moderation
 from .cards import CardError, export_card, parse_card_bytes
 from .chat_service import ChatService, TurnError
 from .db import DB
-from .experiments import ExperimentRunner, stats_csv
+from .experiments import ExperimentRunner, run_spread, stats_csv
 from .providers import ProviderError, clear_mock_cache, close_all, get_provider
 
 
@@ -171,9 +171,8 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
     async def put_settings(body: dict):
         current = get_settings()
         for key, value in body.items():
-            if key == "models":
-                merged = {**(current.get("models") or {}), **(value or {})}
-                db.set_setting("models", config.coerce_setting("models", merged))
+            if key in config.MERGED_SETTINGS:  # 제공사별 모델·옵션, 프롬프트 덮어쓰기는 저장된 값에 합친다
+                db.set_setting(key, config.merge_setting(key, current.get(key), value))
                 continue
             coerced = config.coerce_setting(key, value)
             if key == "provider" and not config.available_providers().get(coerced):
@@ -370,7 +369,10 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
         return experiment
 
     def experiment_stats(experiment: dict) -> dict:
-        return service.stats_for_chats([run["chat_id"] for run in experiment["runs"] if run.get("chat_id")])
+        stats = service.stats_for_chats([run["chat_id"] for run in experiment["runs"] if run.get("chat_id")])
+        if (experiment["spec"].get("repeats") or 1) > 1:  # 반복한 실험은 반복 사이의 편차도 함께 준다
+            stats["spread"] = run_spread(service, experiment["runs"])
+        return stats
 
     @app.post("/api/experiments")
     async def start_experiment(body: dict):
@@ -411,8 +413,9 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
     async def export_experiment(experiment_id: int):
         experiment = experiment_or_404(experiment_id)
         filename = quote(f"{experiment['name'] or '실험'}.csv")
+        stats = experiment_stats(experiment)
         return Response(
-            stats_csv(experiment_stats(experiment)["groups"]),
+            stats_csv(stats["groups"], stats.get("spread")),
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": f"attachment; filename=\"experiment.csv\"; filename*=UTF-8''{filename}"},
         )

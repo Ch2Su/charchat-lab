@@ -163,21 +163,25 @@ class OpenAICompatProvider(Provider):
         messages.append({"role": "user", "content": final_user})
         return messages
 
-    def _options(self, payload: dict, temperature: float | None = None) -> dict:
+    @staticmethod
+    def _values(overrides: dict | None) -> dict:
+        """.env 값에 설정의 덮어쓰기를 얹는다. None은 보내지 않는다는 뜻이다."""
+        values = {"reasoning_effort": config.OPENAI_COMPAT_REASONING_EFFORT, "top_p": config.OPENAI_COMPAT_TOP_P}
+        values.update(overrides or {})
+        return values
+
+    def _options(self, payload: dict, temperature: float | None = None, overrides: dict | None = None) -> dict:
+        values = self._values(overrides)
         if temperature is not None:
             payload["temperature"] = temperature
-        if config.OPENAI_COMPAT_TOP_P is not None:
-            payload["top_p"] = config.OPENAI_COMPAT_TOP_P
-        if config.OPENAI_COMPAT_REASONING_EFFORT:
-            payload["reasoning_effort"] = config.OPENAI_COMPAT_REASONING_EFFORT
+        if values["top_p"] is not None:
+            payload["top_p"] = values["top_p"]
+        if values["reasoning_effort"]:
+            payload["reasoning_effort"] = values["reasoning_effort"]
         return payload
 
-    def options(self) -> dict:
-        return {
-            "reasoning_effort": config.OPENAI_COMPAT_REASONING_EFFORT,
-            "top_p": config.OPENAI_COMPAT_TOP_P,
-            "max_tokens_param": config.OPENAI_COMPAT_MAX_TOKENS_PARAM,
-        }
+    def options(self, overrides: dict | None = None) -> dict:
+        return {**self._values(overrides), "max_tokens_param": config.OPENAI_COMPAT_MAX_TOKENS_PARAM}
 
     def render(self, req: ChatRequest) -> dict:
         system = req.fixed_system + (f"\n\n{req.summary}" if req.summary else "")
@@ -186,7 +190,7 @@ class OpenAICompatProvider(Provider):
             "messages": self._messages(system, req.history, req.final_user),
             config.OPENAI_COMPAT_MAX_TOKENS_PARAM: req.max_tokens,
             "stream": True,
-        }, req.temperature)
+        }, req.temperature, req.options)
         if config.OPENAI_COMPAT_STREAM_USAGE:
             payload["stream_options"] = {"include_usage": True}
         return payload
@@ -243,7 +247,7 @@ class OpenAICompatProvider(Provider):
         yield StreamEvent("done", usage=result, finish_reason=FINISH.get(finish or "stop", finish or "stop"))
 
     async def complete(self, system: str, user: str, model: str, max_tokens: int,
-                       purpose: str = "") -> CompleteResult:
+                       purpose: str = "", options: dict | None = None) -> CompleteResult:
         import openai
 
         try:
@@ -251,7 +255,7 @@ class OpenAICompatProvider(Provider):
                 "model": model,
                 "messages": self._messages(system, [], user),
                 config.OPENAI_COMPAT_MAX_TOKENS_PARAM: max_tokens,
-            }))
+            }, overrides=options))
         except openai.OpenAIError as exc:
             raise _friendly_error(exc) from exc
         text = (response.choices[0].message.content or "") if response.choices else ""

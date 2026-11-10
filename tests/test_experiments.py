@@ -1,5 +1,7 @@
 """대본 재생 실험 실행기(app/experiments.py)와 /api/experiments를 확인한다."""
 import asyncio
+import csv
+import io
 import time
 
 import pytest
@@ -60,7 +62,9 @@ def test_variants_replay_the_script(client, echo_id):
     data = wait_finished(client, start(client, body(echo_id)))
     assert data["status"] == "done" and data["error"] is None and data["finished_at"]
     assert [(r["label"], r["status"], r["turns_done"]) for r in data["runs"]] == [("full", "done", 6), ("anchored", "done", 6)]
-    assert data["progress"] == {"variant": 2, "variants": 2, "turn": 6, "turns": 6}
+    assert data["progress"] == {"run": 2, "runs": 2, "variant": 2, "variants": 2, "repeat": 1, "repeats": 1,
+                                "turn": 6, "turns": 6}
+    assert [r["repeat"] for r in data["runs"]] == [1, 1] and "spread" not in data["stats"]  # 반복하지 않으면 편차가 없다
     assert len({r["chat_id"] for r in data["runs"]}) == 2
     for run in data["runs"]:
         view = client.get(f"/api/chats/{run['chat_id']}").json()
@@ -103,6 +107,11 @@ def test_reset_mock_makes_variants_reproducible(client, haram_id):
     ({"variants": [{"label": "a", "settings": ["full"]}]}, "JSON 객체"),
     ({"cooldown_seconds": 601}, "대기"),
     ({"seed": "7"}, "seed"),
+    ({"repeats": 0}, "반복"),
+    ({"repeats": 6}, "반복"),
+    ({"repeats": "2"}, "반복"),
+    ({"variants": [{"label": "a", "settings": {"provider_options": {"mock": {}}}}]}, "제공사"),
+    ({"variants": [{"label": "a", "settings": {"prompt_overrides": {"final_user": "입력 없음"}}}]}, "자리표시자"),
     ({"character_id": 9999}, "캐릭터"),
 ])
 def test_invalid_requests_are_rejected(client, haram_id, change, message, monkeypatch):
@@ -261,3 +270,42 @@ def test_wait_chat_and_reset_mock():
     assert reset_mock(3) == 1 and not provider.cache.entries
     assert [provider.rng.random() for _ in range(3)] == expected
     asyncio.run(close_all())
+
+
+def test_repeats_alternate_variants_and_report_spread(client, haram_id):
+    same = [{"label": "A", "settings": {}}, {"label": "B", "settings": {}}]
+    data = wait_finished(client, start(client, body(haram_id, inputs=INPUTS[:3], variants=same, repeats=3)))
+    assert data["status"] == "done"
+    # 1회차에 모든 변형, 2회차에 모든 변형 순으로 번갈아 돈다
+    assert [(r["label"], r["repeat"], r["status"]) for r in data["runs"]] == [
+        ("A", 1, "done"), ("B", 1, "done"), ("A", 2, "done"), ("B", 2, "done"), ("A", 3, "done"), ("B", 3, "done")]
+    assert data["progress"] == {"run": 6, "runs": 6, "variant": 2, "variants": 2, "repeat": 3, "repeats": 3,
+                                "turn": 3, "turns": 3}
+    assert client.get(f"/api/chats/{data['runs'][2]['chat_id']}").json()["chat"]["title"] == "[실험] 창 전략 비교 · A · 2회"
+    replies = [[m["content"] for m in answered(client, run["chat_id"])] for run in data["runs"]]
+    assert replies[0] == replies[1] and replies[2] == replies[3]  # 같은 회차의 변형끼리는 같은 시드
+    assert replies[0] != replies[2]  # 회차마다 시드가 하나씩 다르다
+
+    assert [(g["label"], g["turns"]) for g in data["stats"]["groups"]] == [("A", 9), ("B", 9)]  # 비교 표는 반복을 모은다
+    spread = data["stats"]["spread"]
+    assert list(spread) == ["A", "B"] and spread["A"]["runs"] == 3
+    described = spread["A"]["avg_input"]
+    assert described["n"] == 3 and described["sd"] is not None and described["sd"] >= 0
+    timing = ("median_ttft_ms", "median_first_visible_ms")  # 시간은 실제로 잰 값이라 같은 시드여도 다르다
+    assert {k: v for k, v in spread["A"].items() if k not in timing} == \
+        {k: v for k, v in spread["B"].items() if k not in timing}  # 두 변형의 설정과 회차별 시드가 같다
+
+    rows = list(csv.reader(io.StringIO(client.get(f"/api/experiments/{data['id']}/export.csv").text.lstrip("﻿"))))
+    first = dict(zip(rows[0], rows[1]))
+    assert first["label"] == "A" and first["runs"] == "3" and first["avg_input_sd"] != ""
+
+
+def test_estimate_counts_repeats(client, haram_id, monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "PRICING_OVERRIDE_PATH", tmp_path / "none.json")
+    monkeypatch.setattr(config, "OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:9/v1")
+    real = {"provider": "openai_compat", "models": {"openai_compat": "local-model"}}
+    payload = body(haram_id, variants=[{"label": "하나", "settings": real}], repeats=2)
+    data = client.post("/api/experiments/estimate", json=payload).json()
+    assert data["repeats"] == 2 and data["variants"][0]["chat_calls"] == 12 and data["paid_calls"] == 12
+    assert data["cache_overlap"] is True  # 변형이 하나여도 반복하면 같은 모델로 대화를 두 번 보낸다
+    assert client.post("/api/experiments/estimate", json={**payload, "repeats": 1}).json()["cache_overlap"] is False

@@ -65,26 +65,36 @@ class AnthropicProvider(Provider):
             max_retries=2,
         )
 
-    def _max_tokens(self, wanted: int) -> int:
-        if config.ANTHROPIC_THINKING in ("disabled", "between_tools"):
+    @staticmethod
+    def _values(overrides: dict | None) -> dict:
+        """.env 값에 설정의 덮어쓰기를 얹는다. None은 보내지 않는다는 뜻이다."""
+        values = {"effort": config.ANTHROPIC_EFFORT, "thinking": config.ANTHROPIC_THINKING}
+        values.update(overrides or {})
+        return values
+
+    @staticmethod
+    def _max_tokens(wanted: int, thinking: str | None) -> int:
+        if thinking in ("disabled", "between_tools"):
             return wanted
         return wanted + max(0, config.ANTHROPIC_THINKING_HEADROOM)
 
-    def _options(self, payload: dict) -> dict:
-        if config.ANTHROPIC_EFFORT:
-            payload["output_config"] = {"effort": config.ANTHROPIC_EFFORT}
-        if config.ANTHROPIC_THINKING:
-            payload["thinking"] = {"type": config.ANTHROPIC_THINKING}
+    @staticmethod
+    def _options(payload: dict, values: dict) -> dict:
+        if values["effort"]:
+            payload["output_config"] = {"effort": values["effort"]}
+        if values["thinking"]:
+            payload["thinking"] = {"type": values["thinking"]}
         return payload
 
     def render(self, req: ChatRequest) -> dict:
-        return self._options(build_anthropic_payload(req, self._max_tokens(req.max_tokens)))
+        values = self._values(req.options)
+        return self._options(build_anthropic_payload(req, self._max_tokens(req.max_tokens, values["thinking"])), values)
 
-    def options(self) -> dict:
+    def options(self, overrides: dict | None = None) -> dict:
+        values = self._values(overrides)
         return {
-            "effort": config.ANTHROPIC_EFFORT,
-            "thinking": config.ANTHROPIC_THINKING,
-            "thinking_headroom": self._max_tokens(0),  # 사고를 끄면 더하지 않으므로 0
+            **values,
+            "thinking_headroom": self._max_tokens(0, values["thinking"]),  # 사고를 끄면 더하지 않으므로 0
         }
 
     async def stream(self, req: ChatRequest) -> AsyncIterator[StreamEvent]:
@@ -114,15 +124,16 @@ class AnthropicProvider(Provider):
         )
 
     async def complete(self, system: str, user: str, model: str, max_tokens: int,
-                       purpose: str = "") -> CompleteResult:
+                       purpose: str = "", options: dict | None = None) -> CompleteResult:
         import anthropic
 
+        values = self._values(options)
         payload = self._options({
             "model": model,
-            "max_tokens": self._max_tokens(max_tokens),
+            "max_tokens": self._max_tokens(max_tokens, values["thinking"]),
             "system": system,
             "messages": [{"role": "user", "content": user}],
-        })
+        }, values)
         try:
             message = await self.client.messages.create(**payload)
         except anthropic.AnthropicError as exc:
