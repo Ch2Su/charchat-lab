@@ -312,3 +312,7 @@ API 키 없이 돌아가요. 제공사 어댑터는 실제 SDK(anthropic, google
 - Gemini 사고: <https://ai.google.dev/gemini-api/docs/thinking>
 - Gemini 캐시: <https://ai.google.dev/gemini-api/docs/caching>
 - Gemini API 약관: <https://ai.google.dev/gemini-api/terms>
+
+## 라이선스
+
+MIT 라이선스예요. 자세한 내용은 [LICENSE](LICENSE)를 보세요. 이 저장소의 코드를 쓰더라도 각 모델 제공사의 이용 약관(예: 위의 Gemini API 약관)은 따로 지켜야 해요.
