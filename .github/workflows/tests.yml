@@ -1,0 +1,24 @@
+# main에 push할 때와 PR마다 테스트를 돌린다.
+# API 키 없이 mock 제공사와 가짜 HTTP 서버로 돌아가서 비밀값이 필요 없다.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pytest -q

@@ -1,5 +1,7 @@
 # charchat-lab
 
+[![tests](https://github.com/chisu0208/charchat-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/chisu0208/charchat-lab/actions/workflows/tests.yml)
+
 캐릭터 채팅 서비스가 속에서 어떻게 돌아가는지 직접 만져 보는 로컬 실험실이에요.
 모델을 만드는 게 아니라, 모델 API 위에 얹는 부분(프롬프트 조립, 기억 관리, 캐시, 검수)을 구현하고 계측합니다.
 기본 설정은 전체이용가 기준이에요.
@@ -284,7 +286,7 @@ SSE 이벤트: `user`, `meta`(조립 결과), `thinking`(사고 진행: 글자 �
 .venv/bin/python -m pytest
 ```
 
-API 키 없이 돌아가요. 제공사 어댑터는 실제 SDK(anthropic, google-genai, openai)를 가짜 HTTP 서버에 붙여서, 보내는 요청 형식과 스트림 해석을 검증해요.
+API 키 없이 돌아가요. 제공사 어댑터는 실제 SDK(anthropic, google-genai, openai)를 가짜 HTTP 서버에 붙여서, 보내는 요청 형식과 스트림 해석을 검증해요. GitHub에서는 main에 push할 때와 PR마다 같은 테스트가 자동으로 돌아요(`.github/workflows/tests.yml`).
 
 ## 주의할 점
 
