@@ -273,16 +273,24 @@ def test_openai_compat_stream(fake_server, monkeypatch):
     monkeypatch.setattr(config, "OPENAI_COMPAT_REASONING_EFFORT", None)
     monkeypatch.setattr(config, "OPENAI_COMPAT_TOP_P", None)
     MODE["openai_stream"] = "think_tags"
-    provider = OpenAICompatProvider()
-    text, done = asyncio.run(collect(provider, request(model="local-model")))
+
+    async def scenario():
+        # openai 클라이언트(httpx)의 연결은 처음 쓴 이벤트 루프에 묶인다. asyncio.run을 여러 번 부르면 남은
+        # keep-alive 연결이 닫힌 루프를 가리켜 리눅스에서 'Event loop is closed'가 나므로 한 루프에서 모두 부른다
+        provider = OpenAICompatProvider()
+        text, done = await collect(provider, request(model="local-model"))
+        body = RECORDED[-1]["body"]
+        summary = await provider.complete("sys", "user", "local-model", 100)
+        return text, done, body, summary
+
+    text, done, body, summary = asyncio.run(scenario())
     assert text == "안녕하세요"
     assert done.usage.input_total == 900 and done.usage.cache_read == 640 and done.usage.output == 7
     assert done.usage.raw["thinking_estimated"] is True
-    body = RECORDED[-1]["body"]
     assert body["messages"][0]["role"] == "system" and "줄거리" in body["messages"][0]["content"]
     assert body["max_tokens"] == 700 and body["stream_options"] == {"include_usage": True}
     assert body["temperature"] == 0.9 and "top_p" not in body and "reasoning_effort" not in body
-    assert asyncio.run(provider.complete("sys", "user", "local-model", 100)).text == "요약"
+    assert summary.text == "요약"
 
 
 def test_openai_compat_reasoning_field_and_options(fake_server, monkeypatch):
@@ -293,12 +301,16 @@ def test_openai_compat_reasoning_field_and_options(fake_server, monkeypatch):
     monkeypatch.setattr(config, "OPENAI_COMPAT_REASONING_EFFORT", "none")
     monkeypatch.setattr(config, "OPENAI_COMPAT_TOP_P", 0.95)
     MODE["openai_stream"] = "reasoning"
-    try:
+
+    async def scenario():  # 한 이벤트 루프에서 모두 부른다(test_openai_compat_stream 참고)
         provider = OpenAICompatProvider()
-        events = asyncio.run(stream_events(provider, request(model="local-model")))
+        events = await stream_events(provider, request(model="local-model"))
         body = RECORDED[-1]["body"]
-        asyncio.run(provider.complete("sys", "user", "local-model", 100))
-        complete_body = RECORDED[-1]["body"]
+        await provider.complete("sys", "user", "local-model", 100)
+        return events, body, RECORDED[-1]["body"]
+
+    try:
+        events, body, complete_body = asyncio.run(scenario())
     finally:
         MODE["openai_stream"] = "think_tags"
     kinds = [ev.type for ev in events]
