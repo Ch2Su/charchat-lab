@@ -1,6 +1,6 @@
 # charchat-lab
 
-[![tests](https://github.com/chisu0208/charchat-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/chisu0208/charchat-lab/actions/workflows/tests.yml)
+[![tests](https://github.com/Ch2Su/charchat-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/Ch2Su/charchat-lab/actions/workflows/tests.yml)
 
 캐릭터 채팅 서비스가 속에서 어떻게 돌아가는지 직접 만져 보는 로컬 실험실이에요.
 모델을 만드는 게 아니라, 모델 API 위에 얹는 부분(프롬프트 조립, 기억 관리, 캐시, 검수)을 구현하고 계측합니다.
