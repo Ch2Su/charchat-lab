@@ -257,18 +257,24 @@ messages  (대화 시작 자리표시자) + 최근 대화                       
 |---|---|---|
 | GET | `/api/config` | 제공사 상태, 설정, 설정 명세 |
 | PUT | `/api/settings` | 런타임 설정 변경(`models`, `provider_options`, `prompt_overrides`는 저장된 값에 합치고, 항목을 `null`로 보내면 지워요) |
+| POST | `/api/settings/reset` | 런타임 설정을 `.env` 기본값으로 되돌리기 |
 | GET/POST | `/api/characters` | 캐릭터 목록, 만들기 |
+| GET/PUT/DELETE | `/api/characters/{id}` | 캐릭터 조회, 수정, 삭제(그 캐릭터의 대화도 함께 지워요) |
 | POST | `/api/characters/import` | 카드 파일(JSON, PNG) 가져오기 |
 | GET | `/api/characters/{id}/export` | V2 카드 JSON 내보내기 |
-| POST | `/api/chats` | 대화 만들기 |
+| GET/POST | `/api/chats` | 대화 목록(`character_id`로 거를 수 있어요), 만들기 |
 | GET | `/api/chats/{id}` | 지금 경로의 메시지와 형제 정보, 요약 상태 |
+| PATCH/DELETE | `/api/chats/{id}` | 제목·페르소나 수정, 대화 삭제 |
 | POST | `/api/chats/{id}/messages` | 보내기(SSE 스트림) |
 | POST | `/api/chats/{id}/regenerate` | 다시 생성(SSE) |
 | POST | `/api/chats/{id}/switch` | 다른 가지로 이동 |
 | POST | `/api/messages/{id}/edit` | 수정(사용자 메시지는 SSE, 캐릭터 메시지는 JSON) |
 | POST | `/api/chats/{id}/summarize` | 지금 요약 |
+| GET | `/api/chats/{id}/summaries` | 그 대화의 요약 목록 |
+| GET | `/api/chats/{id}/mod-events`, `/api/mod-events` | 검수 로그(대화별, 전체. 최근 100건) |
 | GET | `/api/chats/{id}/stats` | 실행 조건별 사용량·비용 비교(요약·검수 판정 비용 포함, `varying`은 행마다 다른 조건) |
 | GET | `/api/messages/{id}/prompt` | 그 턴에 보낸 요청 원문 |
+| POST | `/api/mock/cache/clear` | mock의 흉내 캐시 비우기 |
 | POST | `/api/experiments/estimate` | 시작하기 전에 변형별 호출 수와 비용 상한, 캐시 섞임 경고를 어림(실험을 만들지 않음) |
 | POST | `/api/experiments` | 대본 재생 실험 시작(한 번에 하나, 실행 중이면 409) |
 | GET | `/api/experiments` | 실험 목록(최근 순, 대본은 개수만) |
