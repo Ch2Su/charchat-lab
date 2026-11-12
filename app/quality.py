@@ -32,10 +32,10 @@ _SPACE = re.compile(r"\s+")
 _POLITE = re.compile(r"(요|니다|네다|니까|세요|죠|십시오)$")
 _PLAIN = re.compile(r"(다|야|어|아|지|냐|니|자|래|게|네|군|걸|거든|잖아|해|와|봐|줘|돼|워)$")
 # 한 글자짜리 대답은 어미 규칙과 반대로 읽힌다("네?"는 존댓말인데 반말 어미 "네"에 걸린다)
+_ANSWER_WORDS = {"네": "polite", "예": "polite", "응": "plain"}
 # 프롬프트의 장치가 답에 그대로 나온 경우. 작은 모델이 마지막 입력에 붙은 <system-memo>를 대사에 따라 쓴다
 # (qwen3.5:2b에서 12턴 중 11턴). 풀지 못한 {{매크로}}와 채팅 템플릿 토큰도 같은 종류의 새어 나옴이다
 _LEAK = re.compile(r"system-memo|\{\{\s*\w+|<\|im_(?:start|end)\|>", re.IGNORECASE)
-_ANSWER_WORDS = {"네": "polite", "예": "polite", "응": "plain"}
 
 
 def script_counts(text: str) -> dict:

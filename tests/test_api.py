@@ -1,3 +1,4 @@
+import json
 import time
 
 from app.cards import export_card, parse_card_json, png_with_card
@@ -167,7 +168,7 @@ def test_auto_cache_mode_rarely_hits(client, haram_id):
 def test_card_import_export_and_block(client):
     card = load_card("echo.json")
     card["data"]["name"] = "에코 복제"
-    response = client.post("/api/characters/import", files={"file": ("echo.json", str.encode(__import__("json").dumps(card)))})
+    response = client.post("/api/characters/import", files={"file": ("echo.json", json.dumps(card).encode())})
     assert response.status_code == 200 and response.json()["name"] == "에코 복제"
     character, lore = parse_card_json(load_card("haram.json"))
     character["name"] = "하람 PNG"
@@ -180,8 +181,12 @@ def test_card_import_export_and_block(client):
 
     bad = load_card("echo.json")
     bad["data"]["description"] += " [[검수테스트]]"
-    response = client.post("/api/characters/import", files={"file": ("bad.json", __import__("json").dumps(bad).encode())})
+    response = client.post("/api/characters/import", files={"file": ("bad.json", json.dumps(bad).encode())})
     assert response.status_code == 400 and "검수" in response.json()["detail"]
+
+    odd = {"name": "모양이 다른 카드", "character_book": {"entries": [{"keys": ["k"], "priority": "높음"}]}}
+    response = client.post("/api/characters/import", files={"file": ("odd.json", json.dumps(odd).encode())})
+    assert response.status_code == 400 and "카드 형식" in response.json()["detail"]  # 서버 오류(500)가 아니다
 
 
 def test_settings_validation(client):
@@ -190,6 +195,12 @@ def test_settings_validation(client):
     body = settings(client, models={"mock": "mock-2"}, input_token_budget=10)
     assert body["model"] == "mock-2" and body["settings"]["input_token_budget"] == 500  # 최소값으로 보정
     assert client.post("/api/settings/reset").json()["model"] == "mock-1"
+
+    # 하나라도 틀리면 함께 보낸 다른 값도 저장하지 않는다
+    before = client.get("/api/config").json()["settings"]["input_token_budget"]
+    mixed = {"input_token_budget": before + 500, "window_strategy": "nope"}
+    assert client.put("/api/settings", json=mixed).status_code == 400
+    assert client.get("/api/config").json()["settings"]["input_token_budget"] == before
 
 
 def test_empty_model_is_rejected_before_streaming(client, echo_id, monkeypatch):
@@ -257,3 +268,41 @@ def test_thinking_only_reply_becomes_notice(client, echo_id, monkeypatch):
     chat_id = new_chat(client, echo_id)["chat"]["id"]
     done = event(send(client, chat_id, "안녕"), "done")[0]["message"]
     assert done["excluded"] and "최대 출력" in done["content"]
+
+
+def test_empty_reply_becomes_notice(client, echo_id, monkeypatch):
+    """빈 답은 안내문으로 바꿔 맥락에서 뺀다. 그대로 저장하면 다음 턴 요청에 빈 메시지가 들어가, 빈 블록을 받지 않는 제공사(Claude 등)가 400을 낸다."""
+    from app import chat_service
+    from app.providers.base import Provider, StreamEvent, Usage
+
+    requests = []
+
+    class Empty(Provider):
+        name = "mock"
+        usage = Usage(input_total=10)
+
+        def render(self, req):
+            return {"fake": True}
+
+        async def stream(self, req):
+            requests.append(req)
+            yield StreamEvent("text", text="\n")
+            yield StreamEvent("done", usage=self.usage, finish_reason="stop")
+
+    provider = Empty()
+    monkeypatch.setattr(chat_service, "get_provider", lambda name: provider)
+    chat_id = new_chat(client, echo_id)["chat"]["id"]
+    done = event(send(client, chat_id, "안녕"), "done")[0]["message"]
+    assert done["excluded"] and "빈 답변" in done["content"]
+
+    provider.usage = Usage(input_total=10, output=50, thinking=50)  # 사고 내용은 안 주고 토큰 수만 알리는 제공사
+    done = event(send(client, chat_id, "다시 안녕"), "done")[0]["message"]
+    assert done["excluded"] and "사고만" in done["content"]
+    assert all(m["content"].strip() for m in requests[-1].history)  # 앞의 빈 답이 요청에 들어가지 않았다
+
+
+def test_blank_assistant_edit_is_rejected(client, echo_id):
+    chat_id = new_chat(client, echo_id)["chat"]["id"]
+    reply = event(send(client, chat_id, "안녕"), "done")[0]["message"]
+    response = client.post(f"/api/messages/{reply['id']}/edit", json={"content": " \n"})
+    assert response.status_code == 400 and "비어" in response.json()["detail"]

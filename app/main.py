@@ -1,6 +1,7 @@
 """FastAPI 앱. 실행: python run.py (또는 uvicorn app.main:create_app --factory --reload)."""
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -170,14 +171,18 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
     @app.put("/api/settings")
     async def put_settings(body: dict):
         current = get_settings()
-        for key, value in body.items():
+        changes = {}
+        for key, value in body.items():  # 먼저 모두 검사한다. 하나라도 틀리면 아무것도 저장하지 않는다
             if key in config.MERGED_SETTINGS:  # 제공사별 모델·옵션, 프롬프트 덮어쓰기는 저장된 값에 합친다
-                db.set_setting(key, config.merge_setting(key, current.get(key), value))
+                changes[key] = config.merge_setting(key, current.get(key), value)
                 continue
             coerced = config.coerce_setting(key, value)
             if key == "provider" and not config.available_providers().get(coerced):
                 raise HTTPException(400, f"'{coerced}' 제공사가 설정되지 않았어요. .env를 확인하고 서버를 다시 시작하세요.")
-            db.set_setting(key, coerced)
+            changes[key] = coerced
+        with db.tx():
+            for key, value in changes.items():
+                db.set_setting(key, value)
         settings = get_settings()
         return {"settings": settings, "model": settings.model}
 
@@ -265,8 +270,6 @@ def create_app(db_path: str | Path | None = None, seed: bool = True) -> FastAPI:
         character = db.get_character(character_id)
         if not character:
             raise HTTPException(404, "캐릭터를 찾을 수 없어요.")
-        import json
-
         body = json.dumps(export_card(character), ensure_ascii=False, indent=2)
         filename = quote(f"{character['name']}.json")
         return Response(

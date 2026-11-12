@@ -38,6 +38,18 @@ def test_v1_and_dict_entries():
         parse_card_bytes(b"\x89PNG\r\n\x1a\nbroken")
 
 
+def test_odd_shaped_cards():
+    """표준과 모양이 다른 카드: 살릴 수 있으면 살리고, 못 읽으면 서버 오류 대신 CardError를 낸다."""
+    odd = {"name": "테스트", "alternate_greetings": "안녕하세요", "tags": "모험, 일상", "character_book": []}
+    character, lore = parse_card_json(odd)
+    assert character["alternate_greetings"] == ["안녕하세요"]  # 글자 하나씩 쪼개지지 않는다
+    assert character["tags"] == ["모험", "일상"] and lore == []
+    with pytest.raises(CardError):
+        parse_card_json({"name": "테스트", "character_book": {"entries": [{"keys": ["k"], "priority": "높음"}]}})
+    with pytest.raises(CardError):  # 조립기가 매 턴 숫자로 쓰는 값이라 가져올 때 걸러야 한다
+        parse_card_json({"name": "테스트", "character_book": {"scan_depth": "깊게"}})
+
+
 def test_macros():
     assert apply_macros("{{char}}와 {{ User }}, <BOT>/<USER>", "하람", "민준") == "하람와 민준, 하람/민준"
 

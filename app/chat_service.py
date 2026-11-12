@@ -39,6 +39,11 @@ THINKING_ONLY_NOTICE = {
     "length": "(사고하다가 최대 출력 토큰을 다 써서 답변이 비었어요. 설정에서 최대 출력을 늘리거나 .env에서 사고를 줄여 보세요.)",
     "other": "(사고만 하고 답변 없이 끝났어요. 다시 생성해 보세요.)",
 }
+# 사고한 흔적도 없이 빈 답이 온 경우. 사고를 스트림으로 알려 주지 않는 서버는 사고에 출력을 다 써도 이렇게 보인다
+EMPTY_NOTICE = {
+    "length": "(최대 출력 토큰을 다 썼는데 답변이 비었어요. 보이지 않는 사고에 썼을 수 있으니 설정에서 최대 출력을 늘려 보세요.)",
+    "other": "(모델이 빈 답변을 보냈어요. 다시 생성해 보세요.)",
+}
 THINKING_SSE_INTERVAL_MS = 300
 
 # 비교 탭에서 행을 나누는 실행 조건(meta.run의 키). moderation_mode는 비용·지연에 영향이 없어 뺐다.
@@ -157,6 +162,9 @@ class ChatService:
         message = self._message(message_id)
         if message["role"] != "assistant":
             raise TurnError("캐릭터 메시지만 이 방식으로 수정할 수 있어요.")
+        content = (content or "").strip()
+        if not content:  # 빈 메시지가 맥락에 남으면 다음 턴 요청에 빈 블록이 들어가, 빈 블록을 받지 않는 제공사(Claude 등)가 400을 낸다
+            raise TurnError("내용이 비어 있어요.")
         chat = self._chat(message["chat_id"])
         settings = self.get_settings()
         # 직접 고친 캐릭터 대사도 다음 턴부터 맥락에 들어가므로 규칙 검수를 거친다
@@ -357,12 +365,13 @@ class ChatService:
         except (asyncio.CancelledError, GeneratorExit):
             # 사용자가 '멈춤'을 눌렀거나 연결이 끊겼다. 화면에 보인 만큼 저장하고 끝낸다.
             shown = "".join(shown_parts)
-            if shown:
+            if shown.strip():
                 meta = base_meta("aborted")
                 meta["finish_reason"] = "aborted"
                 message_id = db.add_message(chat["id"], user_msg["id"], "assistant", shown, meta=meta)
                 db.set_active_leaf(chat["id"], message_id)
                 db.add_prompt_log(chat["id"], message_id, "chat", payload)
+                db.attach_mod_events(event_ids, message_id)
             else:  # 보인 글이 없어 답이 저장되지 않아도 이미 쓴 입력 판정 비용은 남긴다
                 db.add_prompt_log(chat["id"], None, "chat", {"request": payload, "aborted": True, "run": run, "aux": aux})
             raise
@@ -385,7 +394,7 @@ class ChatService:
                 else:
                     event_ids.append(self._log_mod("output", output_check, "logged", raw_text, chat=chat))
 
-        if error and not shown_text:
+        if error and not shown_text.strip():
             # 답변이 저장되지 않는 턴이라, 입력 판정 비용(aux)은 프롬프트 기록에 남겨 비교 집계가 읽게 한다
             db.add_prompt_log(chat["id"], None, "chat", {"request": payload, "error": error, "run": run, "aux": aux})
             yield sse("error", {"message": error, "user_message_id": user_msg["id"]})
@@ -408,10 +417,14 @@ class ChatService:
                 stage="provider", backend="provider", category=finish, action="logged", excerpt=raw_text,
                 detail={"detail": detail}, chat_id=chat["id"], character_id=chat["character_id"],
             ))
-            if not raw_text:
+            if not raw_text.strip():
                 content, excluded = PROVIDER_BLOCK_NOTICE.format(detail=detail or finish), True
-        elif not raw_text and not error and thinking_meta():
-            content, excluded = THINKING_ONLY_NOTICE["length" if finish == "length" else "other"], True
+        elif not raw_text.strip() and not error:
+            # 보이는 답이 없다. 빈 메시지를 그대로 저장하면 다음 턴 요청에 빈 블록이 들어가, 빈 블록을 받지 않는 제공사(Claude 등)가 400을 내므로
+            # 안내문으로 바꿔 맥락에서 뺀다. 사고 내용을 스트림으로 주지 않는 제공사는 사용량의 사고 토큰으로 안다
+            thought = thinking_meta() or (usage and usage.thinking)
+            notices = THINKING_ONLY_NOTICE if thought else EMPTY_NOTICE
+            content, excluded = notices["length" if finish == "length" else "other"], True
 
         # 답변 품질 어림 지표. 가려진 답, 안내문, 오류로 잘린 답은 재지 않는다(멈춤으로 잘린 답처럼 비교가 안 된다)
         if not excluded and not error and content.strip():

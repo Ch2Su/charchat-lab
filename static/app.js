@@ -467,6 +467,13 @@ function qualityFlags(quality) {
   });
 }
 
+// 답변이 맥락에서 빠진 이유. 검수로 가린 것 말고도 제공사가 막았거나 답이 비어 안내문으로 바뀐 경우가 있다
+function excludedText(meta) {
+  if (meta.retracted) return '검수로 가려짐';
+  if (meta.finish_reason === 'safety' || meta.finish_reason === 'refusal') return '제공사가 막음';
+  return '빈 답변';
+}
+
 function messageElement(message, isLast) {
   const view = state.view;
   const el = document.createElement('article');
@@ -502,7 +509,7 @@ function messageElement(message, isLast) {
     tools.append(...metricSpans(meta));
     if (meta.status === 'aborted') tools.append(flag('멈춤으로 중단됨'));
     if (meta.status === 'error') tools.append(flag('오류로 중단됨'));
-    if (message.excluded) tools.append(flag('검수로 가려짐'));
+    if (message.excluded) tools.append(flag(excludedText(meta)));
     if (meta.diagnostics) tools.append(toolButton('계측 보기', () => selectTurn(message.id)));
     if (isLast && message.parent_id !== null) tools.append(toolButton('다시 생성', () => regenerate(message.id)));
     if (!message.excluded) tools.append(toolButton('수정', () => startEdit(el, message)));

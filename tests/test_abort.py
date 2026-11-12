@@ -77,6 +77,29 @@ def test_http_disconnect_saves_partial(tmp_path, monkeypatch):
         app.state.db.close()
 
 
+def test_stop_after_logged_output_keeps_event_linked(tmp_path, monkeypatch):
+    """기록만(log) 모드에서 검수에 걸린 답을 받다가 멈춰도, 검수 기록이 저장된 답에 이어진다."""
+    monkeypatch.setattr(config, "MOCK_DELAY_SCALE", 0)
+    db = DB(tmp_path / "abort.sqlite3")
+    seed_characters(db)
+    service = ChatService(db, lambda: config.build_settings({"moderation_mode": "log", "output_buffer": "sentence"}))
+    chat_id = db.create_chat(db.list_characters()[0]["id"], "민준")
+
+    async def stop_after_flag():
+        stream = service.send(chat_id, "/mod-test-output")
+        async for chunk in stream:
+            if chunk.startswith("event: delta") and "[[검수테스트]]" in chunk:
+                await stream.aclose()
+                break
+
+    asyncio.run(stop_after_flag())
+    leaf = db.get_message(db.get_chat(chat_id)["active_leaf_id"])
+    assert leaf["role"] == "assistant" and leaf["meta"]["status"] == "aborted"
+    events = db.list_mod_events(chat_id)
+    assert events and events[0]["action"] == "logged" and events[0]["message_id"] == leaf["id"]
+    db.close()
+
+
 def test_stopped_before_any_text_keeps_judge_cost(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "MOCK_DELAY_SCALE", 0)
     db = DB(tmp_path / "abort.sqlite3")

@@ -47,8 +47,12 @@ def _as_list(value) -> list:
     return [value]
 
 
+def _as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def _normalize_entry(raw: dict, index: int) -> dict:
-    ext = raw.get("extensions") or {}
+    ext = _as_dict(raw.get("extensions"))
     return {
         "name": str(raw.get("name") or raw.get("comment") or f"항목 {index + 1}"),
         "keys": [str(k) for k in _as_list(raw.get("keys") or raw.get("key"))],
@@ -74,6 +78,17 @@ def parse_card_json(obj: dict) -> tuple[dict, list[dict]]:
     name = str(data.get("name") or "").strip()
     if not name:
         raise CardError("카드에 name이 없습니다")
+    try:
+        return _card_fields(name, data)
+    except (AttributeError, TypeError, ValueError) as exc:
+        # 필드 모양이 표준과 다른 카드(숫자 자리에 글, 목록 자리에 숫자 등). 서버 오류 대신 읽지 못했다고 알린다
+        raise CardError(f"카드 형식이 표준과 달라 읽지 못했습니다: {exc}") from exc
+
+
+def _card_fields(name: str, data: dict) -> tuple[dict, list[dict]]:
+    greetings = data.get("alternate_greetings") or []
+    if isinstance(greetings, str):  # 글 하나만 적은 카드. 그대로 돌면 글자 하나하나가 인사말이 된다
+        greetings = [greetings]
     character = {
         "name": name,
         "description": str(data.get("description") or ""),
@@ -84,18 +99,19 @@ def parse_card_json(obj: dict) -> tuple[dict, list[dict]]:
         "system_prompt": str(data.get("system_prompt") or ""),
         "post_history_instructions": str(data.get("post_history_instructions") or ""),
         "creator_notes": str(data.get("creator_notes") or ""),
-        "alternate_greetings": [str(g) for g in data.get("alternate_greetings") or [] if str(g).strip()],
-        "tags": [str(t) for t in data.get("tags") or []],
-        "extensions": data.get("extensions") or {},
+        "alternate_greetings": [str(g) for g in greetings if str(g).strip()],
+        "tags": [str(t) for t in _as_list(data.get("tags"))],
+        "extensions": _as_dict(data.get("extensions")),
     }
-    book = data.get("character_book") or {}
+    book = _as_dict(data.get("character_book"))
     entries = book.get("entries") or []
     if isinstance(entries, dict):  # 일부 도구는 entries를 {id: entry} 형태로 저장한다
         entries = list(entries.values())
     lore = [_normalize_entry(e, i) for i, e in enumerate(entries) if isinstance(e, dict)]
-    character["book_meta"] = {
-        k: book[k] for k in ("name", "description", "scan_depth", "token_budget") if book.get(k) is not None
-    }
+    character["book_meta"] = {k: book[k] for k in ("name", "description") if book.get(k) is not None}
+    for key in ("scan_depth", "token_budget"):  # 조립기가 매 턴 숫자로 쓰는 값이라 여기서 숫자로 맞춘다
+        if book.get(key) is not None:
+            character["book_meta"][key] = int(book[key])
     return character, lore
 
 
